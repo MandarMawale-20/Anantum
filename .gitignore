@@ -1,0 +1,8 @@
+
+anantum/__pycache__/
+
+anantum/anantum_data/
+
+anantum/models/
+
+.venv
