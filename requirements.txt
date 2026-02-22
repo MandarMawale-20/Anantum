@@ -1,0 +1,7 @@
+faster-whisper
+kokoro-onnx
+sentence-transformers
+faiss-cpu
+sounddevice
+psutil
+duckduckgo-search
