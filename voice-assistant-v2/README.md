@@ -44,7 +44,7 @@ Anantum v2 solves all three. It keeps the **entire interaction loop local**, sup
 |---------|----------------|------------|
 | **Privacy** | Your data is processed on remote servers | Everything stays on your machine |
 | **Reliability** | Requires internet connectivity | Works fully offline |
-| **Latency** | Network round-trips add 200–500ms | Tools respond instantly; local inference |
+| **Latency** | Network round-trips add 200–500ms | <50ms for tools, ~900ms first token |
 | **Cost** | Pay-per-token or subscription | One-time setup, zero ongoing cost |
 | **Control** | Black-box model updates | You choose the model and config |
 
@@ -64,7 +64,7 @@ The tradeoff is intentional: Anantum is designed to be **practical first**, not 
 
 ✅ **Long-term Memory** — Three-tier memory system (hot cache → FAISS → SQLite archive)
 
-✅ **Instant Tools** — Regex-first intent routing for sub-millisecond command execution
+✅ **Instant Tools** — Regex-first intent routing for sub-50ms command execution
 
 ✅ **Multi-step Planning** — Celestial mode for complex task execution
 
@@ -239,7 +239,7 @@ Voice Input
 Whisper STT (faster-whisper, local)
      │
      ▼
-Intent Pre-Classifier (Regex, <1ms)
+Intent Pre-Classifier (Regex, <50ms)
      │
      ├── Tool Match? ──► Execute Tool ──► TTS Response
      │
@@ -281,7 +281,7 @@ Tauri emit() → WebView (SiriWave + captions)
 
 ### Why Tool-First Architecture?
 
-**Problem:** LLM inference takes 100-500ms even on GPU. For simple commands like "what's the time?", waiting for the LLM is wasteful.
+**Problem:** LLM inference takes 900ms+ even on GPU. For simple commands like "what's the time?", waiting for the LLM is wasteful.
 
 **Options:**
 - Route everything through the LLM — Simple but slow
@@ -290,7 +290,7 @@ Tauri emit() → WebView (SiriWave + captions)
 
 **Decision:** Regex-first intent routing. Common commands are handled by regex before the LLM is involved. This means timers, notes, and system info work instantly, even while the model loads.
 
-**Tradeoff:** Requires maintaining regex patterns for each tool. But the latency savings (sub-1ms vs 100-500ms) are worth it.
+**Tradeoff:** Requires maintaining regex patterns for each tool. But the latency savings (sub-50ms vs 900ms) are worth it.
 
 ### Why Background Model Loading?
 
@@ -346,7 +346,7 @@ Tauri emit() → WebView (SiriWave + captions)
 
 ### Why Regex-First Intent Routing?
 
-**Problem:** LLM inference is expensive (100-500ms) for simple, predictable commands.
+**Problem:** LLM inference is expensive (200-900ms) for simple, predictable commands.
 
 **Options:**
 - LLM for everything — Simple but slow
@@ -399,12 +399,13 @@ Measured on **16GB RAM, NVIDIA GTX 1660 Ti (6GB VRAM)**, using **Gemma 3 1B Q5_K
 
 | Metric | Value |
 |--------|-------|
-| **First Token** | ~100ms |
+| **First Token** | ~900ms |
 | **LLM Generation** | ~15 tok/s |
-| **STT (Whisper)** | 200-500ms |
+| **STT (Whisper)** | ~400ms |
 | **TTS (Kokoro)** | 50-200ms |
-| **Intent Classification** | <1ms |
+| **Intent Classification** | <50ms (fast path) |
 | **Tool Execution** | <5ms |
+| **Full Response** | 2–3 seconds |
 | **Warm Memory Lookup (FAISS)** | <50ms |
 | **Cold Memory Search (SQLite FTS5)** | <100ms |
 | **Model Load Time (CPU, 4 threads)** | ~25-35s |
@@ -418,7 +419,6 @@ Measured on **16GB RAM, NVIDIA GTX 1660 Ti (6GB VRAM)**, using **Gemma 3 1B Q5_K
 | **Offline** | Yes |
 | **Internet** | Optional |
 
-> **Note:** Replace these with measurements from your own machine before publishing.
 
 ---
 
@@ -536,7 +536,7 @@ npm run tauri build
 
 ---
 
-## 14. Design Evolution ⭐⭐⭐⭐⭐
+## 14. Design Evolution
 
 ```
 Version 1 (Monolithic — anantum/)
@@ -604,23 +604,17 @@ This evolution shows:
 ## 15. Roadmap
 
 - [x] **v1 Core** — Voice/text interaction, tools, memory, LLM
-- [x] **v2 Modular** — Separated packages, Tauri frontend
-- [ ] **First-run onboarding flow** — Guided model selection and setup wizard
-- [ ] **Benchmark automation** — Script that measures and reports performance metrics
-- [ ] **Walkthrough video/GIF** — 30-second demo of a full voice interaction
+- [x] **v2 Modular** — Separated packages 
+- [ ] **Integration with Tauri** — Desktop widget with SiriWave visualization    
+- [ ] **Native multimodal models** — Newer Gemma models with audio support (when available)
 - [ ] **Expanded skill set** — More tools while keeping names obvious and stable
 - [ ] **Memory quality improvements** — Better summarization and search relevance
-- [ ] **Packaging friction reduction** — One-command desktop builds
-- [ ] **Multi-model support** — Swap between models at runtime
-- [ ] **Plugin system** — Third-party skill development
-- [ ] **Native multimodal models** — Newer Gemma models with audio support (when available)
-- [ ] **Mobile support** — Companion app for Android/iOS
 - [ ] **Edge deployment** — Raspberry Pi, Jetson Nano, other edge devices
-- [ ] **Multi-user profiles** — Separate memory and preferences per user
+
 
 ---
 
-## 16. Lessons Learned ⭐⭐⭐⭐⭐
+## 16. Lessons Learned 
 
 ### Useful before smart.
 
@@ -669,10 +663,8 @@ When you can't throw cloud GPUs at the problem, you have to be smart about resou
 ## 18. References
 
 ### Papers
-- [Gemma: Open Models Based on Gemini Research and Technology](https://arxiv.org/abs/2403.08295)
 - [Whisper: Robust Speech Recognition via Large-Scale Weak Supervision](https://arxiv.org/abs/2212.04356)
 - [FAISS: A Library for Efficient Similarity Search](https://arxiv.org/abs/2401.08281)
-- [Efficient Estimation of Word Representations in Vector Space](https://arxiv.org/abs/1301.3781)
 
 ### Projects
 - [llama.cpp](https://github.com/ggerganov/llama.cpp) — Local LLM inference
@@ -702,15 +694,133 @@ MIT
 
 This section is for recruiters, founders, and engineers who want to understand the full journey behind Anantum v2.
 
-| Resource | Description |
-|----------|-------------|
-| 📄 [Research Document](docs/research.md) | Full research document covering design decisions, experiments, and findings |
-| 🏗️ [Figma Architecture](https://www.figma.com) | Interactive architecture diagram showing component relationships and data flow |
-| 🎥 [Demo Video](https://www.youtube.com) | 5-minute walkthrough of the system in action |
-| 📝 [Design Notes](docs/design-notes.md) | Iteration log showing how the architecture evolved from v1 to v2 |
-| 📊 [Benchmarks](docs/benchmarks.md) | Detailed performance profiling and optimization results |
-| 🧪 [Experiments Log](docs/experiments.md) | Failed approaches, dead ends, and what was learned from each |
-| 📦 [Packaging Guide](PACKAGING.md) | Build and distribution documentation |
+---
+
+### Anantum — Edge AI Voice Assistant
+
+A fully offline voice assistant that runs entirely on consumer hardware. No cloud calls, no subscriptions, no data leaving the machine. Every word you speak stays on your device.
+
+### Why I built this
+
+It started as a project called VoiceCare — a basic regex-based assistant with STT and TTS wired together. Nothing intelligent, just pattern matching. I used cloud APIs for a while after that, but I kept running into the same problem: every time I said something to the assistant, that audio was going to someone else's server. For a personal assistant that's supposed to know your habits, preferences, and routines, that felt wrong. Privacy wasn't a nice-to-have — it was the point.
+
+So I moved everything local. That decision changed every other decision after it.
+
+### What it does
+
+- Responds to voice or text in real time
+- Handles common commands (timers, notes, weather, calculator, system info) without touching the LLM
+- Runs a local GGUF language model through llama.cpp for open-ended conversation
+- Remembers facts about you across sessions using a three-tier memory system
+- Packages as a native desktop app via Tauri
+
+### Architecture
+
+```
+Voice Input (Whisper STT)
+        ↓
+Intent Classifier (regex-first, no LLM cost for common commands)
+        ↓
+    ┌───────────────────────────────┐
+    │  Tool Handler (fast path)     │  ← time, notes, timers, calculator
+    │  AgentBrain (LLM path)        │  ← open conversation
+    └───────────────────────────────┘
+        ↓
+Memory System
+  ├── Hot Cache      (last 20 turns, in-memory ring buffer)
+  ├── Warm Store     (FAISS HNSW, semantic search over facts)
+  └── Cold Archive   (SQLite + FTS5, compressed session summaries)
+        ↓
+Kokoro TTS → Audio Output
+```
+
+The assistant runs as a Python backend launched by a Tauri shell. Communication happens over a stdio JSON bridge — Tauri spawns the Python process, exchanges newline-delimited JSON packets, and renders the frontend.
+
+### Hardware it runs on
+
+GTX 1650 (4GB VRAM) + mid-range CPU. This constraint shaped almost every technical decision in the project.
+
+With 4GB VRAM, you can't just load everything onto the GPU and call it done. Whisper runs on CPU to leave headroom for the LLM. The embedding model for memory search runs on CPU. Kokoro TTS runs on CPU by default unless you explicitly enable CUDA. The LLM gets as many GPU layers as VRAM allows, configured at launch via `--gpu`.
+
+Measured performance:
+
+- First token: ~900ms on GPU
+- Full response: 2–3 seconds
+- STT transcription: ~400ms on CPU (distil-whisper/distil-small.en)
+
+Not instant, but fast enough to feel like a conversation.
+
+### Engineering decisions I had to make
+
+**Why GGUF + llama.cpp instead of a hosted model?**
+
+The first version used OpenAI's API. It was fast and easy. It also meant every sentence the user spoke was sent to a third-party server. When the goal is a private local assistant, that's not a trade-off — it's a contradiction.
+
+GGUF with llama.cpp lets you run quantized models that fit in consumer VRAM. The trade-off is setup complexity: building llama-cpp-python with CUDA support on Windows requires matching CUDA toolkit versions, the right MSVC build tools, and patience. I spent more time on this than I'd like to admit. But once it works, the model runs locally forever with no API costs and no data leaving the machine.
+
+**Why Gemma 3 1B?**
+
+Size. On a GTX 1650 with 4GB VRAM shared with the OS, you don't have room for a 7B model. Gemma 3 1B fits with enough headroom to actually run inference without thrashing. It's not the smartest model, but it's fast enough for a voice assistant where you need responses in under 3 seconds.
+
+**Why FAISS for memory instead of a vector database?**
+
+The obvious choice would be something like ChromaDB or Qdrant. Both are good. Both require running a separate process or server. For a desktop app that needs to work offline, adding a database server as a dependency is the wrong call — it's one more thing that can fail, one more thing the user has to manage.
+
+FAISS runs in-process, stores to disk as a flat file, and loads in under a second. The trade-off is that I had to implement persistence, backup, and index management myself. That's fine — the result is simpler to package and simpler to debug.
+
+I chose the HNSW index specifically because it handles approximate nearest-neighbor search well on small-to-medium datasets (hundreds of memories, not millions) and doesn't require training like IVF indexes do.
+
+**Why SQLite for cold archive instead of a flat file?**
+
+Session summaries need to be searchable, not just retrievable. SQLite's FTS5 extension gives you full-text search over compressed conversation history without any external dependencies. It's also transactional, which matters when you're writing summaries from a background thread while the main loop is still running.
+
+I briefly considered just writing summaries to a JSON file. The problem is that JSON files don't support efficient search, and loading the entire file into memory to search it scales poorly. SQLite was the right tool.
+
+**Why regex-first intent routing instead of always using the LLM?**
+
+LLM inference takes 900ms minimum. Asking the LLM "what time is it?" is wasteful — the answer has nothing to do with language understanding, it's a system call. The intent classifier handles about 15 common command types with regex patterns before the LLM ever sees the input. This means time, date, timers, notes, and calculator all respond in under 50ms.
+
+The LLM is reserved for what it's actually good at: open-ended conversation where the answer can't be pattern-matched.
+
+**Why a three-tier memory system?**
+
+The three tiers map to three different retrieval problems:
+
+- Hot cache — you need the last few turns fast, always. A ring buffer is perfect.
+- Warm store — you need to find relevant facts semantically ("do you know my job?"). FAISS handles this.
+- Cold archive — you need to retain the gist of old sessions without keeping full transcripts forever. SQLite + summarization handles this.
+
+Each tier has a different speed/capacity trade-off. Trying to do all three with one system leads to either too slow retrieval or too much memory usage.
+
+### The hardest part of building this
+
+Getting the CUDA environment working. This sounds trivial but it wasn't.
+
+llama-cpp-python with CUDA on Windows requires a specific combination of: CUDA toolkit version, MSVC compiler version, Python version, and the right cmake flags. There's no installer that handles all of this. I went through several failed builds before I understood that the CUDA toolkit version has to match the one PyTorch was compiled against, and that using the wrong compiler silently produces a CPU-only build with no error message.
+
+Once the environment was stable, the next hard problem was STT hallucinations. Whisper, when given silence or ambient noise, confidently transcribes things like "Thank you for watching" or "Please subscribe." These are real Whisper outputs on silent audio — it's been trained on so much YouTube content that it pattern-matches silence to video outros. I built a hallucination filter that catches known false-positive phrases, checks no-speech probability per segment, and validates minimum audio energy before transcription. Not perfect, but it cut false triggers significantly.
+
+The third problem was getting STT, LLM inference, and TTS to not block each other. The naive approach — transcribe, then generate, then speak — means the user waits for full generation before hearing anything. The current pipeline streams tokens as they're generated, splits them into sentences, and pushes each sentence to the TTS queue as soon as it arrives. The user hears the first sentence while the model is still generating the second.
+
+### How it evolved
+
+- **VoiceCare (v1)** — regex patterns, STT, TTS. No intelligence, just command matching. Fast but useless for anything outside its pattern list.
+- **Cloud API version** — swapped regex for GPT-3.5 calls. Much smarter, but every voice input went to OpenAI's servers. Killed it when I realized that broke the whole point.
+- **Single pipeline (early v2)** — local model, but everything ran sequentially. STT finished, then LLM ran, then TTS played. Total latency was 5–8 seconds. Unusable for a voice assistant.
+- **Current architecture** — parallel pipeline with intent routing, streaming TTS, background memory operations, and async LLM loading. First response latency is now 900ms–3s depending on whether the intent hits the fast path.
+
+### What I'd redesign today
+
+The speech pipeline has too many moving parts. Separate STT → LLM → TTS stages made sense when those were the only options. Newer multimodal models with native audio understanding would collapse that into a single stage, removing latency between the transcription and generation steps.
+
+I'd also separate the memory embedding process from the main thread entirely. Right now FAISS search and insertion happen inline, which causes occasional latency spikes during conversation if the warm store is large.
+
+### Lessons from building this
+
+- Local AI is mostly a systems engineering problem. The model is the easy part — the hard parts are latency, memory, threading, and packaging.
+- Constraints produce better architecture. The 4GB VRAM limit forced decisions that made the system leaner and more deliberate than it would have been otherwise.
+- Debugging distributed pipelines without logs is impossible. I added structured logging late and immediately found three bugs I'd been unable to reproduce.
+- Simplicity wins at packaging time. Every dependency that requires a running process (database server, model server, etc.) is a thing that can fail at install time on a user's machine.
 
 ---
 
