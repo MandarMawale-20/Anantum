@@ -1,0 +1,44 @@
+{
+  "productName": "Anantum Siri Widget",
+  "version": "0.1.0",
+  "identifier": "com.anantum.widget",
+  "build": {
+    "beforeDevCommand": "",
+    "beforeBuildCommand": "",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "assistant",
+        "title": "Anantum",
+        "width": 366,
+        "height": 76,
+        "resizable": false,
+        "fullscreen": false,
+        "decorations": false,
+        "transparent": true,
+        "backgroundColor": "#00000000",
+        "shadow": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": true,
+        "focus": true,
+        "center": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "icon": [
+      "icons/icon.ico"
+    ],
+    "resources": [
+      "../dist/backend"
+    ]
+  }
+}

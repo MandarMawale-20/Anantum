@@ -1,0 +1,53 @@
+# =============================================================================
+# Anantum v2 — .gitignore
+# =============================================================================
+
+# --- Python cache and packaging output ---
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyinstaller-build/
+.pyinstaller-spec/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+
+# --- Runtime logs and local state ---
+*.log
+*.sqlite3
+*.sqlite
+*.db
+*.faiss
+
+# --- Local model and audio assets ---
+*.gguf
+*.onnx
+*.bin
+*.wav
+data/
+models/
+
+# --- Environment files ---
+.env
+.env.local
+
+# --- Frontend and Rust build output ---
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/build-tauri.log
+frontend/src-tauri/target/
+frontend/src-tauri/gen/
+
+# --- OS and editor noise ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

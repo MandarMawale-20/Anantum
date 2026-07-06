@@ -5,3 +5,11 @@ faiss-cpu
 sounddevice
 psutil
 duckduckgo-search
+colorama
+torch
+optimum
+transformers
+onnxruntime-gpu
+webrtcvad
+pyaudio
+openwakeword

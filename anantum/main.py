@@ -1,5 +1,8 @@
-# main.py — Anantum entry point
-# Startup order: TTS -> Memory -> STT -> LLM (background) -> Brain
+"""Anantum — Edge AI Voice Assistant.
+
+Monolithic runtime that orchestrates TTS, STT, LLM, memory, and tool routing
+into a single voice/text interactive session.
+"""
 
 import os
 import sys
@@ -9,25 +12,17 @@ import signal
 import threading
 import tempfile
 import wave
-from pathlib import Path
 
-# Configuration: edit these for your hardware setup.
-# Defaults are tuned for GTX 1650 4GB + 4-core CPU.
+# Runtime configuration — override via CLI flags or .env
 CONFIG = {
     "llm_model":           "models/gemma3-voice-Q5_K_M.gguf",
     "whisper_model":       "ctranslate2-4you/distil-whisper-small.en-ct2-float32",
-    "kokoro_voice":        "af_bella",   # voices: af_bella, af_sky, am_adam, af_nicole
-
-    # n_gpu_layers: balance between speed and VRAM. 0=CPU only, 35=full GPU for 1650.
-    # Q5_K_M is ~850MB; fits in VRAM leaving room for KV cache.
+    "kokoro_voice":        "af_bella",
     "llm_n_gpu_layers":    35,
     "llm_n_ctx":           2048,
     "llm_n_threads":       4,
-
     "stt_device":          "cpu",
     "stt_compute":         "int8",
-
-    # Silence detection: adjust silence_threshold if mic environment is very noisy
     "silence_threshold":   400,
     "silence_duration":    1.8,
     "min_speech_chunks":   8,
@@ -37,19 +32,18 @@ CONFIG = {
 }
 
 
-# TTS (Kokoro) loads first so we can narrate startup progress.
-    # Saves time vs waiting for LLM to load to give user feedback.
 class KokoroTTS:
+    """Text-to-speech via Kokoro ONNX pipeline with GPU/CPU auto-detection."""
 
     GARBAGE = {"none", "null", "undefined", "n/a", "okay.", "ok.", "yes.", "no."}
 
     def __init__(self, voice: str = "af_bella", device: str = "auto"):
         self.voice = voice
-        self.device = device   # "auto", "cuda", "cpu"
+        self.device = device
         self._pipe = None
         self._available = False
         self._speak_lock = threading.Lock()
-        self._sr = 24000       # Kokoro native sample rate
+        self._sr = 24000
 
     def load(self) -> bool:
         try:
@@ -63,14 +57,10 @@ class KokoroTTS:
 
             if use_device == "cuda":
                 torch.set_default_device("cuda")
-                print(f"[TTS] Kokoro loading on GPU (CUDA)")
-            else:
-                print(f"[TTS] Kokoro loading on CPU")
 
             self._pipe = KPipeline(lang_code='a')
             self._available = True
             self._gpu = (use_device == "cuda")
-            print(f"[TTS] Kokoro ready ({'GPU' if self._gpu else 'CPU'})")
             return True
 
         except ImportError:
@@ -87,7 +77,7 @@ class KokoroTTS:
         if len(t) < CONFIG["min_response_length"]:
             return True
         if t.startswith("[") and t.endswith("]"):
-            return True  # leaked internal tags like [intent: none]
+            return True
         if t.lower().rstrip(".,!?") in self.GARBAGE:
             return True
         return False
@@ -107,7 +97,6 @@ class KokoroTTS:
 
             with self._speak_lock:
                 all_audio = []
-                # kokoro splits sentences internally and returns chunks
                 for _, _, audio in self._pipe(text, voice=self.voice):
                     if audio is not None and len(audio) > 0:
                         all_audio.append(audio)
@@ -123,7 +112,6 @@ class KokoroTTS:
             print(f"\033[94mAnantum:\033[0m {text}")
 
     def speak_nonblocking(self, text: str):
-        """Queue speech in a background thread without blocking the caller."""
         if self._should_skip(text):
             return
         threading.Thread(target=self.speak, args=(text, True), daemon=True).start()
@@ -133,27 +121,21 @@ class KokoroTTS:
         return self._available
 
 
-    # STT (Whisper).
-    # distil-whisper-small is faster than fullsize with <1% accuracy loss.
 class WhisperSTT:
+    """Speech-to-text via faster-whisper with hallucination filtering."""
 
-    # Common Whisper hallucinations. Model repeats these when confidence is low.
     _HALLUCINATION_PHRASES = {
-        # "Thank you for watching" is the #1 false positive in the wild
         "thank you", "thank you very much", "thank you so much",
         "thanks", "thanks for watching", "thank you for watching",
         "thank you for listening", "thanks for listening",
         "thank you for having me", "thank you for having us",
         "thanks for having me",
-        # Subscribe/channel noise
         "please subscribe", "like and subscribe", "don't forget to subscribe",
         "hit the like button", "leave a comment",
-        # Common noise misdetections
         "you", "the", ".", "", " ", "i", "a",
         "bye", "goodbye", "see you", "see you next time", "see you later",
         "uh", "um", "uh huh", "mm", "hmm", "ah", "oh", "yeah",
         "okay", "ok", "alright", "right", "sure",
-        # Repeated filler
         "yeah yeah yeah", "no no no", "okay okay",
     }
 
@@ -166,7 +148,6 @@ class WhisperSTT:
     def load(self) -> bool:
         try:
             from faster_whisper import WhisperModel
-            print(f"[STT] Loading {self._model_name}...")
             self._model = WhisperModel(
                 self._model_name,
                 device=self._device,
@@ -182,7 +163,6 @@ class WhisperSTT:
             try:
                 from faster_whisper import WhisperModel
                 self._model = WhisperModel("tiny.en", device=self._device, compute_type=self._compute)
-                print("[STT] Loaded tiny.en as fallback")
                 return True
             except Exception as e2:
                 print(f"[STT] Fallback also failed: {e2}")
@@ -194,7 +174,6 @@ class WhisperSTT:
         t = text.lower().strip().rstrip(".,!?")
         if t in self._HALLUCINATION_PHRASES:
             return True
-        # catch repetitive junk like "thank you thank you thank you"
         words = t.split()
         if len(words) >= 4:
             for i in range(len(words) - 1):
@@ -212,10 +191,7 @@ class WhisperSTT:
         if not self._model:
             return input("You (text): ").strip()
         try:
-            import os
             file_size = os.path.getsize(audio_path)
-            # Skip very short audio that's likely noise, not speech.
-            # Threshold: 16000 bytes = 0.5s @ 16 kHz 16-bit mono.
             if file_size < 16000:
                 return ""
 
@@ -229,11 +205,11 @@ class WhisperSTT:
                     "speech_pad_ms": 200,
                     "threshold": 0.45,
                 },
-                condition_on_previous_text=False,  # disables cross-segment history chaining
+                condition_on_previous_text=False,
                 no_speech_threshold=0.6,
                 log_prob_threshold=-1.0,
-                compression_ratio_threshold=1.9,   # tighter filter catches repeating junk
-                temperature=0.0,                   # greedy: avoid sampling noise on short audio
+                compression_ratio_threshold=1.9,
+                temperature=0.0,
             )
 
             good_segments = []
@@ -241,21 +217,15 @@ class WhisperSTT:
                 text = seg.text.strip()
                 if not text:
                     continue
-                # Skip high no_speech probability
                 if hasattr(seg, "no_speech_prob") and seg.no_speech_prob > 0.55:
-                    print(f"[STT] Rejected (no_speech={seg.no_speech_prob:.2f}): {text!r}")
                     continue
                 if self._is_hallucination(text):
-                    print(f"[STT] Rejected (hallucination): {text!r}")
                     continue
                 good_segments.append(text)
 
             result = " ".join(good_segments).strip()
 
-            # Final pass: catch hallucinations spanning multiple segments.
-            # E.g., "thank you thank you" sometimes passes segment filtering.
             if self._is_hallucination(result):
-                print(f"[STT] Rejected (final filter): {result!r}")
                 return ""
 
             return result
@@ -308,7 +278,6 @@ class WhisperSTT:
             if not recorded or not speech_started:
                 return None
 
-            # Require at least ~0.4 seconds of actual speech
             if len(recorded) < 4:
                 return None
 
@@ -326,7 +295,6 @@ class WhisperSTT:
             return None
 
 
-# --- startup banner ---
 def print_banner():
     gpu = "GPU" if CONFIG["llm_n_gpu_layers"] > 0 else "CPU"
     print("\n\033[96m" + "═" * 52)
@@ -337,39 +305,33 @@ def print_banner():
     print("═" * 52 + "\033[0m\n")
 
 
-# --- main assistant ---
 class Anantum:
+    """Main assistant orchestrator — loads models, runs voice/text loop."""
+
     def __init__(self):
         print_banner()
 
-        # 1. TTS first — so it can narrate the rest of startup
-        print("\033[33m[1/5] Initializing voice engine (Kokoro)...\033[0m")
+        # 1) TTS first so startup can announce progress.
         self.tts = KokoroTTS(voice=CONFIG["kokoro_voice"], device=CONFIG.get("tts_device", "auto"))
         tts_ok = self.tts.load()
         if tts_ok:
-            print("\033[32m      ✓ Kokoro TTS ready\033[0m")
             self.tts.speak("Anantum starting up. Please wait.")
         else:
-            print("\033[33m      ! Text-only mode (install kokoro for voice)\033[0m")
+            print("[TTS] Text-only mode (install kokoro for voice)")
 
-        # 2. Memory
-        print("\033[33m[2/5] Loading memory system...\033[0m")
+        # 2) Memory layer.
         from memory_system import MemoryManager
         self.memory = MemoryManager()
-        count = len(self.memory.warm)
-        print(f"\033[32m      ✓ Memory ready  ({count} memories loaded)\033[0m")
 
-        # 3. STT
-        print("\033[33m[3/5] Loading speech recognition (Whisper)...\033[0m")
+        # 3) STT layer.
         self.stt = WhisperSTT(CONFIG["whisper_model"],
                                CONFIG["stt_device"],
                                CONFIG["stt_compute"])
         stt_ok = self.stt.load()
-        print("\033[32m      ✓ Whisper STT ready\033[0m" if stt_ok
-              else "\033[33m      ! Text input fallback active\033[0m")
+        if not stt_ok:
+            print("[STT] Text input fallback active")
 
-        # 4. LLM — background thread so we don't block
-        print("\033[33m[4/5] Language model loading in background...\033[0m")
+        # 4) LLM in background so tool-only paths are available immediately.
         from llm_manager import LLMManager
         self.llm = LLMManager(
             model_path=CONFIG["llm_model"],
@@ -380,17 +342,15 @@ class Anantum:
         self._llm_ready = threading.Event()
         threading.Thread(target=self._load_llm_bg, daemon=True).start()
 
-        # 5. Brain
-        print("\033[33m[5/5] Starting agent brain...\033[0m")
+        # 5) Routing/response brain.
         from agent_brain import AgentBrain
         self.brain = AgentBrain(self.llm, self.memory)
-        print("\033[32m      ✓ Agent brain ready\033[0m")
 
         signal.signal(signal.SIGINT, self._on_exit)
         signal.signal(signal.SIGTERM, self._on_exit)
 
         gpu_str = f"GPU ({CONFIG['llm_n_gpu_layers']} layers)" if CONFIG["llm_n_gpu_layers"] > 0 else "CPU"
-        print(f"\n\033[92m[*] Anantum is online  [{gpu_str}]  — LLM warming up...\033[0m\n")
+        print(f"\n[*] Anantum is online  [{gpu_str}]  — LLM warming up...\n")
         self.tts.speak("Ready. Instant tools available now. Language model loading in background.")
 
     def _load_llm_bg(self):
@@ -399,16 +359,16 @@ class Anantum:
             self._llm_ready.set()
             layers = CONFIG["llm_n_gpu_layers"]
             status = f"GPU ({layers} layers)" if layers > 0 else "CPU"
-            print(f"\n\033[92m[LLM] ✓ Gemma 3 1B ready on {status}\033[0m")
+            print(f"\n[LLM] Gemma 3 1B ready on {status}")
             self.tts.speak("Language model ready. I'm fully operational now.")
         except FileNotFoundError as e:
-            print(f"\n\033[91m[LLM] ✗ Not found: {e}\033[0m")
-            print("[LLM]   Running tool-only mode.")
+            print(f"\n[LLM] Model not found: {e}")
+            print("[LLM] Running tool-only mode.")
         except Exception as e:
-            print(f"\n\033[91m[LLM] ✗ {e}\033[0m")
+            print(f"\n[LLM] Failed to load: {e}")
 
     def run_voice(self):
-        print("\033[36m[voice mode]  Ctrl+C to exit\033[0m\n")
+        print("[voice mode]  Ctrl+C to exit\n")
 
         tts_queue = queue.Queue()
 
@@ -428,7 +388,7 @@ class Anantum:
                 return
             s = sentence.strip()
             if s.startswith("[") and s.endswith("]"):
-                return  # suppress internal tags
+                return
             print(f"\033[94mAnantum:\033[0m {s}")
             tts_queue.put(s)
 
@@ -458,7 +418,7 @@ class Anantum:
         tts_thread.join(timeout=3)
 
     def run_text(self):
-        print("\033[36m[text mode]  type 'exit' to quit\033[0m\n")
+        print("[text mode]  type 'exit' to quit\n")
 
         def on_sentence(sentence: str):
             if not sentence or not sentence.strip():
@@ -483,14 +443,13 @@ class Anantum:
                 break
 
     def _on_exit(self, *args):
-        print("\n\033[90m[Shutdown] Saving session...\033[0m")
-        self.memory.on_session_end()  # triggers final summary in background
-        time.sleep(0.8)  # let background thread finish before exit
-        print("\033[90m[Shutdown] Goodbye!\033[0m")
+        print("\n[Shutdown] Saving session...")
+        self.memory.on_session_end()
+        time.sleep(0.8)
+        print("[Shutdown] Goodbye!")
         sys.exit(0)
 
 
-# --- entry point ---
 if __name__ == "__main__":
     import argparse
 

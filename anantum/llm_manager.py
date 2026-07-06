@@ -1,7 +1,12 @@
-# llm_manager.py — loads and runs the local GGUF model via llama-cpp-python
-# Supports GPU layer offloading via n_gpu_layers.
+"""Llama.cpp wrapper for local GGUF inference.
+
+Handles model loading, prompt building, text generation (sync + streaming),
+and JSON-structured planning for multi-step tasks.
+"""
 
 import time
+import json
+import re
 from pathlib import Path
 from typing import Generator
 
@@ -30,24 +35,16 @@ What I know about this user (use ONLY these when answering personal questions):
 
 def build_prompt(user_message: str, memory_context: dict,
                  conversation_history: list, mode: str = "normal") -> str:
-    """Build a Gemma 3 instruct prompt with memory context.
-    
-    Gemma lacks a system role, so we inject system+memory into the first user turn.
-    Then append conversation history and the current user message.
-    This ensures memory facts influence the entire response, not just the last query.
-    """
+    """Build a Gemma-style prompt with memory and recent history."""
     now = time.strftime("%I:%M %p, %A %B %d %Y")
     system = SYSTEM_PROMPT.format(current_time=now)
 
-    # Inject semantically relevant facts from memory.
-    # Limits to 5 to leave room for actual query in context window.
     facts = memory_context.get("relevant_facts", [])
     if facts:
         fact_lines = [f"- {f['text']}" for f in facts[:5]]
         if fact_lines:
             system += MEMORY_BLOCK.format(facts="\n".join(fact_lines))
 
-    # Use last 4 exchanges: helps model stay focused, reduces token waste.
     history = conversation_history[-8:]
     history_str = ""
     for turn in history:
@@ -58,13 +55,12 @@ def build_prompt(user_message: str, memory_context: dict,
         else:
             history_str += f"<start_of_turn>model\n{content}<end_of_turn>\n"
 
-    # Full prompt: system context in first user turn, then history, then current query
     prompt = (
         f"<start_of_turn>user\n"
         f"{system}\n"
         f"<end_of_turn>\n"
         f"<start_of_turn>model\n"
-        f"Understood. I\'m Anantum, ready to help.\n"
+        f"Understood. I'm Anantum, ready to help.\n"
         f"<end_of_turn>\n"
         f"{history_str}"
         f"<start_of_turn>user\n{user_message}<end_of_turn>\n"
@@ -74,12 +70,14 @@ def build_prompt(user_message: str, memory_context: dict,
 
 
 class LLMManager:
+    """Manages a local GGUF language model via llama.cpp."""
+
     def __init__(self, model_path: str, n_ctx: int = 2048,
                  n_threads: int = 4, n_gpu_layers: int = 0):
         self.model_path = Path(model_path)
         self.n_ctx = n_ctx
         self.n_threads = n_threads
-        self.n_gpu_layers = n_gpu_layers   # 0 = CPU, >0 = partial/full GPU offload
+        self.n_gpu_layers = n_gpu_layers
         self._llm = None
         self._loaded = False
 
@@ -138,7 +136,6 @@ class LLMManager:
         )
         text = out["choices"][0]["text"].strip()
 
-        # strip any stop tokens the model leaked into the output
         for stop_tok in stop:
             if stop_tok.strip() in text:
                 text = text[:text.index(stop_tok.strip())].strip()
@@ -165,12 +162,12 @@ class LLMManager:
         ):
             token = chunk["choices"][0]["text"]
             if token:
-                # Filter leaked stop tokens mid-stream
                 if any(s.strip() in token for s in stop):
                     return
                 yield token
 
     def generate_json_plan(self, task: str, available_tools: dict) -> dict:
+        """Generate a structured JSON plan for multi-step Celestial tasks."""
         tools_str = "\n".join(f"  - {k}: {v}" for k, v in available_tools.items())
 
         plan_prompt = (
@@ -186,7 +183,6 @@ class LLMManager:
 
         raw = self.generate(plan_prompt, max_tokens=400, temperature=0.05)
 
-        import json, re
         match = re.search(r'\{.*\}', raw, re.DOTALL)
         if match:
             try:

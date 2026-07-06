@@ -1,19 +1,15 @@
-"""Regex-first intent routing for low-latency tool calls.
-
-Classifies user input into predefined intent types using pattern matching,
-enabling sub-millisecond routing to tool handlers without LLM involvement.
-"""
+# Regex-first intent routing.
 
 import re
+import threading
 import time
-import socket
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
 
 class IntentType(Enum):
-    # Tool-backed intents
+    # Tool-handled intents
     SYSTEM_TIME      = "system_time"
     SYSTEM_DATE      = "system_date"
     TIMER_SET        = "timer_set"
@@ -42,12 +38,12 @@ class Intent:
     params: dict
     requires_internet: bool = False
     requires_llm: bool = False
-    fast_path: bool = True
+    fast_path: bool = True  # True if no LLM needed
 
 
-# Keep specific rules above broad ones to avoid shadowing.
+# Keep specific patterns before broad ones.
 PATTERNS = [
-    # Mode
+    # Mode switching
     (IntentType.MODE_SWITCH, [
         r"activate celestial mode",
         r"anantum.*celestial",
@@ -59,7 +55,7 @@ PATTERNS = [
         r"switch to normal",
     ], {"requires_internet": False, "requires_llm": False}),
 
-    # Time/date
+    # Clock/date
     (IntentType.SYSTEM_TIME, [
         r"what(?:'s| is) the time",
         r"current time",
@@ -196,14 +192,19 @@ PATTERNS = [
 
 
 def check_internet(timeout: float = 2.0) -> bool:
-    """Probe a small set of hosts and return on first success."""
+    """Probe a few endpoints in parallel and return on first success."""
+    import socket
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     hosts = [
-        ("8.8.8.8", 53),
-        ("1.1.1.1", 53),
-        ("142.250.80.46", 80),
-        ("api.open-meteo.com", 80),
+        ("8.8.8.8", 53),            # Google DNS
+        ("1.1.1.1", 53),            # Cloudflare DNS
+        ("142.250.80.46", 80),      # google.com HTTP
+        ("api.open-meteo.com", 80), # weather API itself
     ]
-    for host, port in hosts:
+
+    def _probe(host_port):
+        host, port = host_port
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(timeout)
@@ -211,73 +212,76 @@ def check_internet(timeout: float = 2.0) -> bool:
             s.close()
             return True
         except Exception:
-            continue
+            return False
+
+    with ThreadPoolExecutor(max_workers=len(hosts)) as pool:
+        futures = {pool.submit(_probe, hp): hp for hp in hosts}
+        for future in as_completed(futures):
+            if future.result():
+                return True
     return False
 
 
 class IntentPreClassifier:
-    """Pre-classify obvious tool intents before falling back to the LLM."""
 
     def __init__(self):
-        self._compiled = []
-        for intent_type, patterns, flags in PATTERNS:
-            compiled = [re.compile(p, re.IGNORECASE) for p in patterns]
-            self._compiled.append((intent_type, compiled, flags))
+        self._rules = [
+            (intent_type, [re.compile(p, re.IGNORECASE) for p in patterns], flags)
+            for intent_type, patterns, flags in PATTERNS
+        ]
 
-        # Cache connectivity checks to avoid probing on every turn.
+        # Cache connectivity checks.
         self._internet_available: Optional[bool] = None
-        self._internet_checked_at: float = 0
-        self._internet_cache_ttl: float = 30
+        self._inet_last_check: float = 0
+        self._inet_ttl: float = 30
 
     def classify(self, text: str) -> Intent:
-        """Return first matching intent, or CONVERSATION fallback."""
-        text_stripped = text.strip()
-        t0 = time.monotonic()
+        cleaned_text = text.strip()
 
-        for intent_type, compiled_patterns, flags in self._compiled:
-            for pattern in compiled_patterns:
-                match = pattern.search(text_stripped)
-                if match:
-                    params = self._extract_params(intent_type, match, text_stripped)
-                    confidence = 0.95
+        for intent_type, match, flags in self._find_match(cleaned_text):
+            requires_internet = flags.get("requires_internet", False)
+            requires_llm = flags.get("requires_llm", False)
+            fast_path = flags.get("fast_path", True)
 
-                    requires_internet = flags.get("requires_internet", False)
-                    requires_llm = flags.get("requires_llm", False)
-                    fast_path = flags.get("fast_path", True)
+            if requires_internet and not self._check_internet_cached():
+                return self._build_conversation_fallback(intent_type)
 
-                    if requires_internet:
-                        online = self._check_internet_cached()
-                        if not online:
-                            return Intent(
-                                type=IntentType.CONVERSATION,
-                                confidence=0.9,
-                                params={"no_internet_for": intent_type.value},
-                                requires_internet=True,
-                                requires_llm=False,
-                                fast_path=True
-                            )
+            return Intent(
+                type=intent_type,
+                confidence=0.95,
+                params=self._extract_params(intent_type, match, cleaned_text),
+                requires_internet=requires_internet,
+                requires_llm=requires_llm,
+                fast_path=fast_path,
+            )
 
-                    return Intent(
-                        type=intent_type,
-                        confidence=confidence,
-                        params=params,
-                        requires_internet=requires_internet,
-                        requires_llm=requires_llm,
-                        fast_path=fast_path
-                    )
-
-        # Fallback to free-form conversation.
         return Intent(
             type=IntentType.CONVERSATION,
             confidence=0.7,
             params={},
             requires_internet=False,
             requires_llm=True,
-            fast_path=False
+            fast_path=False,
+        )
+
+    def _find_match(self, text: str):
+        for intent_type, patterns, flags in self._rules:
+            for pattern in patterns:
+                match = pattern.search(text)
+                if match:
+                    yield intent_type, match, flags
+
+    def _build_conversation_fallback(self, intent_type: IntentType) -> Intent:
+        return Intent(
+            type=IntentType.CONVERSATION,
+            confidence=0.9,
+            params={"no_internet_for": intent_type.value},
+            requires_internet=True,
+            requires_llm=False,
+            fast_path=True,
         )
 
     def _extract_params(self, intent_type: IntentType, match: re.Match, text: str) -> dict:
-        """Normalize regex captures into handler params."""
         groups = [g for g in match.groups() if g is not None]
         params = {}
 
@@ -313,7 +317,6 @@ class IntentPreClassifier:
         return params
 
     def _parse_duration(self, text: str) -> int:
-        """Convert duration text to seconds; default to 60 on parse miss."""
         text = text.lower().strip()
         total = 0
         patterns = [
@@ -327,10 +330,17 @@ class IntentPreClassifier:
                 total += int(m.group(1)) * multiplier
         return total if total > 0 else 60
 
-    def _check_internet_cached(self) -> bool:
-        """Connectivity check with TTL cache."""
-        now = time.time()
-        if self._internet_available is None or (now - self._internet_checked_at) > self._internet_cache_ttl:
+    def _refresh_internet_async(self):
+        def _check():
             self._internet_available = check_internet()
-            self._internet_checked_at = now
+            self._inet_last_check = time.time()
+        threading.Thread(target=_check, daemon=True).start()
+
+    def _check_internet_cached(self) -> bool:
+        now = time.time()
+        if self._internet_available is None:
+            self._internet_available = check_internet()
+            self._inet_last_check = now
+        elif (now - self._inet_last_check) > self._inet_ttl:
+            self._refresh_internet_async()
         return self._internet_available

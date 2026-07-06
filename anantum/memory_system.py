@@ -1,36 +1,71 @@
-# memory_system.py — three-tier memory for personalization and context.
-#
-# Hot:  in-memory deque of last N turns. Used for immediate context. Zero latency.
-# Warm: FAISS HNSW semantic index. Stores facts and key memories. ~5ms query.
-# Cold: SQLite archive for conversation summaries. Searched less often. ~20ms.
+"""Three-tier memory stack: hot deque, warm FAISS store, cold SQLite archive.
+
+Provides persistent, semantically-searchable memory across sessions
+with automatic fact extraction and conversation summarization.
+"""
 
 import json
 import math
 import time
+import re
 import threading
 import sqlite3
 import numpy as np
 from pathlib import Path
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from collections import deque
 from typing import Optional
 import faiss
-from sentence_transformers import SentenceTransformer
+from optimum.onnxruntime import ORTModelForFeatureExtraction
+from transformers import AutoTokenizer
+import torch
 
 EMBEDDING_DIM = 384
 DATA_DIR = Path("anantum_data")
 DATA_DIR.mkdir(exist_ok=True)
 
 
+class ONNXEmbeddingModel:
+    """ONNX-optimized sentence embedding model running on GPU."""
+
+    def __init__(self):
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            "sentence-transformers/all-MiniLM-L6-v2"
+        )
+        self.model = ORTModelForFeatureExtraction.from_pretrained(
+            "sentence-transformers/all-MiniLM-L6-v2",
+            export=True,
+            provider="CUDAExecutionProvider"
+        )
+
+    def encode(self, texts, convert_to_numpy=True):
+        if isinstance(texts, str):
+            texts = [texts]
+
+        inputs = self.tokenizer(
+            texts,
+            padding=True,
+            truncation=True,
+            return_tensors="pt"
+        )
+
+        outputs = self.model(**inputs)
+        embeddings = outputs.last_hidden_state.mean(dim=1)
+
+        if convert_to_numpy:
+            return embeddings.cpu().numpy()
+        return embeddings
+
+
 @dataclass
 class MemoryEntry:
     text: str
-    embedding: list           # 384-dim vector
+    embedding: list
     timestamp: float
     access_count: int = 0
-    importance: float = 0.5   # 0.0 → 1.0
-    decay_rate: float = 0.008 # per day — ~4 months half-life
-    memory_type: str = "fact" # fact | preference | event | summary
+    importance: float = 0.5
+    decay_rate: float = 0.008
+    memory_type: str = "fact"
     metadata: dict = None
 
     def __post_init__(self):
@@ -38,24 +73,17 @@ class MemoryEntry:
             self.metadata = {}
 
     def effective_score(self, query_similarity: float) -> float:
-        """Score = semantic relevance × time decay × importance boost + access frequency.
-        
-        Exponential decay means 4-month-old facts fade to 50%. Frequently-accessed
-        memories (e.g., user name) stay fresh. Low-importance facts (e.g., "likes coffee")
-        lose relevance faster unless queried, encouraging focus on salient context.
-        """
+        """Blend semantic relevance, freshness, importance, and access frequency."""
         days_old = (time.time() - self.timestamp) / 86400
-        temporal_decay = math.exp(-self.decay_rate * days_old)  # ~4mo half-life
+        temporal_decay = math.exp(-self.decay_rate * days_old)
         access_boost = min(self.access_count * 0.04, 0.25)
-        importance_weight = 0.7 + (self.importance * 0.6)  # scales 0.7–1.3
+        importance_weight = 0.7 + (self.importance * 0.6)
 
         return (query_similarity * temporal_decay * importance_weight) + access_boost
 
 
-# --- hot cache ---
-
 class HotCache:
-    """Last 20 conversation turns kept in a deque. No embedding overhead."""
+    """In-memory window of recent conversation turns."""
 
     def __init__(self, max_turns: int = 20):
         self.turns: deque = deque(maxlen=max_turns)
@@ -81,31 +109,30 @@ class HotCache:
         return len(self.turns)
 
 
-# --- warm store (FAISS) ---
-
 class WarmStore:
-    """
-    FAISS HNSW index for semantic memory retrieval.
-    HNSW is ~10x faster than a flat index at scale and stays accurate enough for this use case.
-    """
+    """FAISS HNSW semantic store for medium-term memory."""
 
     INDEX_FILE = DATA_DIR / "warm_index.faiss"
     META_FILE = DATA_DIR / "warm_meta.json"
 
-    def __init__(self, embedding_model: SentenceTransformer):
+    def __init__(self, embedding_model):
         self.model = embedding_model
         self.entries: list[MemoryEntry] = []
 
-        # HNSW: approximate nearest neighbor search. 32 connections per node balances
-        # query latency (~5ms) vs recall (~99%). Faster than flat L2 at scale.
-        self.index = faiss.IndexHNSWFlat(EMBEDDING_DIM, 32)
-        self.index.hnsw.efConstruction = 200  # index construction cost
-        self.index.hnsw.efSearch = 64          # query-time search effort
+        cpu_index = faiss.IndexHNSWFlat(EMBEDDING_DIM, 32)
+        cpu_index.hnsw.efConstruction = 200
+        cpu_index.hnsw.efSearch = 32
+
+        try:
+            res = faiss.StandardGpuResources()
+            self.index = faiss.index_cpu_to_gpu(res, 0, cpu_index)
+        except Exception:
+            self.index = cpu_index
 
         self._load()
 
     def embed(self, text: str) -> np.ndarray:
-        vec = self.model.encode([text], convert_to_numpy=True)[0]
+        vec = self.model.encode([text])[0]
         return vec.astype(np.float32)
 
     def add(self, text: str, importance: float = 0.5,
@@ -121,16 +148,15 @@ class WarmStore:
         )
         self.entries.append(entry)
         self.index.add(vec.reshape(1, -1))
-        self._save()
+        if len(self.entries) % 10 == 0:
+            self._save()
         return entry
 
-    def search(self, query: str, top_k: int = 5) -> list[tuple[MemoryEntry, float]]:
+    def search(self, query: str, top_k: int = 3) -> list[tuple[MemoryEntry, float]]:
         if len(self.entries) == 0:
             return []
 
         q_vec = self.embed(query).reshape(1, -1)
-        # Fetch 3x candidates; re-ranking by effective_score corrects for recency/importance.
-        # This trades a small search cost for better relevance than pure semantic similarity.
         k = min(top_k * 3, len(self.entries))
         distances, indices = self.index.search(q_vec, k)
 
@@ -138,13 +164,11 @@ class WarmStore:
         for dist, idx in zip(distances[0], indices[0]):
             if idx == -1:
                 continue
-            # Convert L2 distance to 0-1 similarity for consistent scoring.
             similarity = 1.0 / (1.0 + dist)
             entry = self.entries[idx]
             final_score = entry.effective_score(similarity)
             results.append((entry, final_score))
 
-        # re-rank and trim to top_k
         results.sort(key=lambda x: x[1], reverse=True)
         top_results = results[:top_k]
 
@@ -164,15 +188,18 @@ class WarmStore:
 
         self.entries = [e for e, _ in scored[:max_entries]]
 
-        # HNSW doesn't support deletion, so we have to rebuild
         self._rebuild_index()
         self._save()
-        print(f"[Memory] Pruned to {len(self.entries)} entries")
 
     def _rebuild_index(self):
-        self.index = faiss.IndexHNSWFlat(EMBEDDING_DIM, 32)
-        self.index.hnsw.efConstruction = 200
-        self.index.hnsw.efSearch = 64
+        cpu_index = faiss.IndexHNSWFlat(EMBEDDING_DIM, 32)
+        cpu_index.hnsw.efConstruction = 200
+        cpu_index.hnsw.efSearch = 32
+        try:
+            res = faiss.StandardGpuResources()
+            self.index = faiss.index_cpu_to_gpu(res, 0, cpu_index)
+        except Exception:
+            self.index = cpu_index
         if self.entries:
             vecs = np.array([e.embedding for e in self.entries], dtype=np.float32)
             self.index.add(vecs)
@@ -202,7 +229,6 @@ class WarmStore:
                 with open(self.META_FILE) as f:
                     meta = json.load(f)
                 self.entries = [MemoryEntry(**m) for m in meta]
-                print(f"[Memory] Loaded {len(self.entries)} warm memories")
             except Exception as e:
                 print(f"[Memory] Failed to load warm store: {e}, starting fresh")
 
@@ -210,13 +236,8 @@ class WarmStore:
         return len(self.entries)
 
 
-# --- cold archive (SQLite) ---
-
 class ColdArchive:
-    """
-    SQLite-backed archive for conversation summaries and old memories.
-    Written in a background thread; never fully loaded into RAM.
-    """
+    """SQLite archive for summaries and long-tail memory."""
 
     DB_FILE = DATA_DIR / "cold_archive.db"
 
@@ -286,49 +307,27 @@ class ColdArchive:
             return [r[0] for r in cur.fetchall()]
 
 
-# --- memory manager ---
-
 class MemoryManager:
-    """
-    Unified interface over all three tiers.
-    Handles fact extraction, background summarisation, and decay/pruning.
-    """
+    """Unified coordinator over hot, warm, and cold memory tiers."""
 
-    # Regex patterns for extracting facts from user messages.
-    # Patterns are intentionally strict and require sentence boundaries
-    # to avoid false positives like "I'm going to the store."
     FACT_PATTERNS = [
-        # Name — very specific, requires proper noun-like word
         (r"my name is ([A-Z][a-z]+(?:\s[A-Z][a-z]+)*)", "name", 1.0),
         (r"(?:call me|i(?:'m| am)) ([A-Z][a-z]+)(?:\s*[,\.]|$)", "name", 0.9),
-
-        # Location — requires preposition + location noun
         (r"i(?:'m| am) from ([\w\s]+?)(?:\s*[,\.]|$)", "location", 0.7),
         (r"i live in ([\w\s]+?)(?:\s*[,\.]|$)", "location", 0.7),
         (r"i(?:'m| am) based in ([\w\s]+?)(?:\s*[,\.]|$)", "location", 0.7),
-
-        # Role — must end clearly, not "I'm going to..."
         (r"i(?:'m| am) a(?:n)? ([\w\s]{3,30})(?:\s*[,\.]|$)", "role", 0.6),
-
-        # Preferences — require a meaningful object
         (r"i (?:really )?(?:like|love|enjoy) ([\w\s]{3,40})(?:\s*[,\.]|$)", "preference", 0.6),
         (r"i (?:hate|dislike|don't like) ([\w\s]{3,40})(?:\s*[,\.]|$)", "aversion", 0.6),
         (r"i (?:use|prefer) ([\w\s]{2,30}) (?:for|over|instead)", "tool_preference", 0.6),
-
-        # Projects — must follow "on" or "building"
         (r"i(?:'m| am) working on ([A-Za-z][\w\s]{2,40})(?:\s*[,\.]|$)", "project", 0.8),
         (r"i(?:'m| am) building ([A-Za-z][\w\s]{2,40})(?:\s*[,\.]|$)", "project", 0.8),
         (r"i(?:'m| am) developing ([A-Za-z][\w\s]{2,40})(?:\s*[,\.]|$)", "project", 0.8),
-
-        # Goals
         (r"my (?:goal|aim|target) is (?:to )?([\w\s]{5,60})(?:\s*[,\.]|$)", "goal", 0.9),
-
-        # Explicit remember/note requests (user deliberately saying this)
         (r"remember that (.{5,100})(?:\s*[,\.]|$)", "note", 0.85),
         (r"note that (.{5,100})(?:\s*[,\.]|$)", "note", 0.85),
     ]
 
-    # Values that should never be stored as a fact on their own
     FACT_BLACKLIST = {
         "going", "fine", "good", "great", "okay", "ok", "well", "here",
         "there", "sure", "ready", "done", "back", "up", "in", "out",
@@ -337,21 +336,19 @@ class MemoryManager:
     }
 
     def __init__(self):
-        print("[Memory] Loading embedding model...")
-        self.embedder = SentenceTransformer("all-MiniLM-L6-v2")
+        print("[Memory] Loading ONNX embedding model on GPU...")
+        self.embedder = ONNXEmbeddingModel()
 
         self.hot = HotCache(max_turns=20)
         self.warm = WarmStore(self.embedder)
         self.cold = ColdArchive()
 
         self._summary_pending_turns = 0
-        self._summary_threshold = 20  # summarize every 20 turns
+        self._summary_threshold = 20
         self._bg_lock = threading.Lock()
 
-        print(f"[Memory] Ready — {len(self.warm)} warm memories loaded")
-
     def process_user_message(self, text: str):
-        """Call on every user turn. Adds to hot cache and runs fact extraction."""
+        """Record user turn and run extraction/summarization checks."""
         self.hot.add("user", text)
         self._extract_and_store_facts(text)
         self._summary_pending_turns += 1
@@ -360,26 +357,23 @@ class MemoryManager:
             self._trigger_background_summary()
 
     def process_assistant_message(self, text: str):
-        """Call on every assistant turn. Adds to hot cache."""
+        """Record assistant turn."""
         self.hot.add("assistant", text)
 
     def get_context_for_prompt(self, query: str) -> dict:
-        """
-        Returns the memory context dict needed to build a prompt:
-          recent_turns   -> hot cache (last 6 turns)
-          relevant_facts -> warm FAISS results
-          past_summaries -> cold archive summaries
-        """
+        """Build memory context payload for prompt construction."""
         recent_turns = self.hot.get_recent(n=6)
 
-        warm_results = self.warm.search(query, top_k=5)
-        relevant_facts = [
-            {"text": e.text, "score": round(score, 3), "type": e.memory_type}
-            for e, score in warm_results
-            if score > 0.15  # skip very low-relevance hits
-        ]
+        if len(query.strip()) < 20 or query.lower() in ("hi", "hello", "hey"):
+            relevant_facts = []
+        else:
+            warm_results = self.warm.search(query, top_k=3)
+            relevant_facts = [
+                {"text": e.text, "score": round(score, 3), "type": e.memory_type}
+                for e, score in warm_results
+                if score > 0.15
+            ]
 
-        # tier 3: a couple of recent summaries for long-term context
         past_summaries = self.cold.get_recent_summaries(limit=2)
 
         return {
@@ -397,20 +391,12 @@ class MemoryManager:
         self.warm.prune(max_entries=5000)
 
     def on_session_end(self):
-        """Trigger a final summary when the user closes the app or goes idle."""
+        """Trigger final summary before shutdown."""
         if len(self.hot) >= 4:
             self._trigger_background_summary(force=True)
 
-    # --- fact extraction ---
-
     def _extract_and_store_facts(self, text: str):
-        """Extract user facts from natural conversation.
-        
-        Patterns are strict (require sentence endings) to avoid false positives like
-        "I'm going to the store" being parsed as "going" = location. False positives
-        pollute memory more than false negatives, so we prefer high precision.
-        """
-        import re
+        """Extract high-confidence user facts from free-form text."""
         for pattern, fact_type, importance in self.FACT_PATTERNS:
             match = re.search(pattern, text, re.IGNORECASE)
             if not match:
@@ -419,14 +405,11 @@ class MemoryManager:
             fact_lower = fact_text.lower()
             if len(fact_text) < 3:
                 continue
-            # Skip if it's purely a blacklisted word (e.g., "fine" or "going").
             words = fact_lower.split()
             if len(words) == 1 and fact_lower in self.FACT_BLACKLIST:
                 continue
             if len(words) <= 2 and words and words[0] in self.FACT_BLACKLIST:
                 continue
-            # Skip verb phrases that user is saying as actions, not defining themselves.
-            # "I'm going to X" is not the same as "I am X".
             if re.match(r"^(going|trying|planning|about|wanting|looking|just|also)\s", fact_lower):
                 continue
             full_fact = f"[{fact_type}] {fact_text}"
@@ -436,8 +419,6 @@ class MemoryManager:
             )
             if already:
                 continue
-            # Names: replace old entry to avoid ambiguity ("one" vs "mandar").
-            # User mistake or correction should overwrite stale fact.
             if fact_type == "name":
                 self.warm.entries = [e for e in self.warm.entries if e.memory_type != "name"]
                 self.warm._rebuild_index()
@@ -446,28 +427,23 @@ class MemoryManager:
                 memory_type=fact_type,
                 metadata={"source": "auto_extract", "original": text}
             )
-            print(f"[Memory] Extracted: {full_fact}")
-
-    # --- background summarisation ---
 
     def _trigger_background_summary(self, force: bool = False):
-        """Summarise recent conversation turns in a background thread."""
+        """Summarize recent turns on a background worker."""
         def _summarize():
             with self._bg_lock:
                 turns = self.hot.get_all()
                 if len(turns) < 4:
                     return
 
-                # Build summary text from turns
                 lines = []
                 for t in turns:
                     role = "User" if t["role"] == "user" else "Anantum"
                     lines.append(f"{role}: {t['content'][:200]}")
 
-                summary_text = " | ".join(lines[-10:])  # condense last 10 turns
+                summary_text = " | ".join(lines[-10:])
                 turn_range = f"{len(turns)} turns"
 
-                # Extract key topics for tags
                 tags = self._extract_topics(summary_text)
 
                 self.cold.store_summary(
@@ -476,13 +452,12 @@ class MemoryManager:
                     tags=tags
                 )
                 self._summary_pending_turns = 0
-                print(f"[Memory] Saved conversation summary ({turn_range})")
 
         thread = threading.Thread(target=_summarize, daemon=True)
         thread.start()
 
     def _extract_topics(self, text: str) -> list[str]:
-        """Simple word-frequency keyword extraction for summary tags."""
+        """Simple frequency-based tag extraction for summaries."""
         stopwords = {"i", "a", "the", "is", "it", "to", "you", "me", "and",
                      "or", "of", "in", "on", "my", "do", "did", "was", "are"}
         words = text.lower().split()

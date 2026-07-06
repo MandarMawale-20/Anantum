@@ -1,8 +1,58 @@
 
-anantum/__pycache__/
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyc
 
-anantum/anantum_data/
-
-anantum/models/
-
+# Virtual environments
 .venv
+venv/
+env/
+.venv*/
+
+# Environment files
+.env
+.env.local
+
+# Data and models
+anantum/anantum_data/
+anantum/models/
+voice-assistant-v2/data/
+voice-assistant-v2/models/
+
+# Runtime data files
+*.db
+*.faiss
+*.wav
+*.gguf
+
+# Frontend (Node.js)
+voice-assistant-v2/frontend/node_modules/
+voice-assistant-v2/frontend/dist/
+
+# Tauri/Rust build artifacts
+voice-assistant-v2/frontend/src-tauri/target/
+voice-assistant-v2/frontend/target/
+voice-assistant-v2/frontend/src-tauri/gen/
+
+# Build output artifacts
+*.exe
+*.msi
+*.dmg
+*.app
+*.deb
+*.AppImage
+
+# PyInstaller build artifacts
+voice-assistant-v2/.pyinstaller-build/
+voice-assistant-v2/.pyinstaller-spec/
+
+# General data directory
+data/
+
+# OS files
+.DS_Store
+Thumbs.db
+

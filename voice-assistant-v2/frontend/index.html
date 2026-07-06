@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Anantum V2</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="desktop-anchor" data-tauri-drag-region>
+      <section
+        class="assistant-pill is-idle"
+        id="assistantWidget"
+        data-tauri-drag-region
+        aria-live="polite"
+        aria-label="Floating assistant"
+      >
+        <div class="inner-highlight" aria-hidden="true"></div>
+
+        <div class="orb-shell" id="orbShell" role="button" tabindex="0" aria-label="Toggle listening state">
+          <div id="siri-container" data-tauri-drag-region></div>
+        </div>
+
+        <div class="assistant-copy" data-tauri-drag-region>
+          <p class="assistant-label" id="assistantText">How can I help?</p>
+          <p class="assistant-meta" id="assistantMeta">Idle</p>
+          <div class="assistant-actions">
+            <button type="button" class="ghost-action" id="changeModelBtn">Change model</button>
+          </div>
+          <div class="event-chip" id="eventChip" hidden></div>
+          <div class="reminder-stack" id="reminderStack" aria-live="polite"></div>
+        </div>
+      </section>
+    </main>
+
+    <script src="./siriwave.js"></script>
+    <script src="./script.js"></script>
+  </body>
+</html>

@@ -1,7 +1,9 @@
-# tools.py — all tool functions available in Normal Mode
-# Each tool is registered with a decorator and invoked through ToolRegistry.
+"""Tool implementations and registration for normal/celestial modes.
 
-import os
+Provides a registry of callable tools (time, date, timers, notes, calculator,
+system info, weather, web search) that can be invoked by the intent router.
+"""
+
 import re
 import json
 import time
@@ -10,22 +12,24 @@ import math
 import datetime
 import threading
 import sqlite3
+import platform
+import subprocess
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable
 
 DATA_DIR = Path("anantum_data")
 DATA_DIR.mkdir(exist_ok=True)
 NOTES_DB = DATA_DIR / "notes.db"
 
 
-# Tool registry: central dispatch for all available functions.
-# Each tool is a standalone function with @ToolRegistry.register decorator.
 class ToolRegistry:
+    """Central registry for tool functions with metadata."""
+
     _tools: dict = {}
 
     @classmethod
     def register(cls, name: str, description: str, mode: str = "both"):
-        """Register a function as a callable tool. Modes: 'normal', 'celestial', 'both'."""
+        """Register a callable tool."""
         def decorator(fn: Callable):
             cls._tools[name] = {
                 "fn": fn,
@@ -54,8 +58,6 @@ class ToolRegistry:
         }
 
 
-# --- time and date ---
-
 @ToolRegistry.register("get_time", "Get current time", mode="both")
 def get_time() -> dict:
     now = datetime.datetime.now()
@@ -76,8 +78,6 @@ def get_date() -> dict:
         "iso": now.date().isoformat(),
     }
 
-
-# --- timer manager ---
 
 class TimerManager:
     """Thread-safe in-process timer manager with desktop notifications."""
@@ -152,14 +152,20 @@ class TimerManager:
         """Cross-platform desktop notification."""
         msg = f"[Timer] {label} - Time's up!"
         try:
-            import platform
             system = platform.system()
             if system == "Darwin":
-                os.system(f'osascript -e \'display notification "{msg}" with title "Anantum"\'')
+                subprocess.run(
+                    ["osascript", "-e", f'display notification "{msg}" with title "Anantum"'],
+                    timeout=5, check=False,
+                )
             elif system == "Linux":
-                os.system(f'notify-send "Anantum" "{msg}" 2>/dev/null || echo "{msg}"')
+                subprocess.run(["notify-send", "Anantum", msg], timeout=5, check=False)
             elif system == "Windows":
-                os.system(f'msg * "{msg}" 2>nul || echo {msg}')
+                subprocess.run(
+                    ["msg", "*", msg],
+                    timeout=5, check=False,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
             else:
                 print(f"\n[TIMER] {msg}\n")
         except Exception:
@@ -203,8 +209,6 @@ def list_timers() -> dict:
 def cancel_timer(timer_id: str = None) -> dict:
     return TimerManager.cancel(timer_id)
 
-
-# --- notes ---
 
 def _init_notes_db():
     conn = sqlite3.connect(str(NOTES_DB))
@@ -272,18 +276,11 @@ def get_notes(limit: int = 5, search: str = None) -> dict:
     return {"notes": notes, "count": len(notes), "display": display}
 
 
-# --- calculator ---
-
 @ToolRegistry.register("calculate", "Evaluate a math expression safely", mode="both")
 def calculate(expression: str = "", raw_text: str = "") -> dict:
-    """Safely evaluate math expressions. No eval() or exec()—uses AST whitelisting.
-    
-    This prevents code injection while still supporting natural input like
-    '15% of 200' or 'square root of 144'.
-    """
+    """Safely evaluate math expressions using AST whitelisting."""
     expr = expression or raw_text
 
-    # Normalize natural language math operators to symbols.
     expr = expr.lower()
     expr = re.sub(r"\bplus\b", "+", expr)
     expr = re.sub(r"\bminus\b", "-", expr)
@@ -293,21 +290,18 @@ def calculate(expression: str = "", raw_text: str = "") -> dict:
     expr = re.sub(r"\bcubed\b", "**3", expr)
     expr = re.sub(r"\bsquare root of\b", "sqrt", expr)
 
-    # Percent of
     pct_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:percent|%)\s*of\s*(\d+(?:\.\d+)?)", expr)
     if pct_match:
         pct, total = float(pct_match.group(1)), float(pct_match.group(2))
         result = pct / 100 * total
         return {"result": result, "display": f"{pct}% of {total} = {result}"}
 
-    # sqrt
     sqrt_match = re.search(r"sqrt\s*\(?(\d+(?:\.\d+)?)\)?", expr)
     if sqrt_match:
         n = float(sqrt_match.group(1))
         result = math.sqrt(n)
         return {"result": result, "display": f"√{n} = {result}"}
 
-    # Safe eval: only allow numbers and operators
     safe_expr = re.sub(r"[^\d\s\+\-\*\/\.\(\)\^%]", "", expr)
     safe_expr = safe_expr.replace("^", "**")
 
@@ -315,7 +309,6 @@ def calculate(expression: str = "", raw_text: str = "") -> dict:
         import ast
         tree = ast.parse(safe_expr, mode='eval')
 
-        # only allow basic arithmetic nodes, reject anything else
         allowed = (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant,
                    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod,
                    ast.FloorDiv, ast.USub, ast.UAdd)
@@ -328,8 +321,6 @@ def calculate(expression: str = "", raw_text: str = "") -> dict:
     except Exception as e:
         return {"error": str(e), "display": f"Couldn't compute that. Try: '2 + 2' or '15% of 200'"}
 
-
-# --- device / system info ---
 
 @ToolRegistry.register("get_device_info", "Get system info: CPU, RAM, disk, battery", mode="both")
 def get_device_info() -> dict:
@@ -355,7 +346,7 @@ def get_device_info() -> dict:
                 info["battery_percent"] = round(battery.percent, 1)
                 info["battery_plugged"] = battery.power_plugged
         except Exception:
-            pass  # not all platforms support battery info
+            pass
 
         lines = [
             f"CPU: {cpu}%",
@@ -373,20 +364,13 @@ def get_device_info() -> dict:
         return {"display": "Install psutil for system info: pip install psutil", "error": "psutil not installed"}
 
 
-# --- weather (requires internet) ---
-
 @ToolRegistry.register("get_weather", "Get current weather (requires internet)", mode="both")
 def get_weather(location: str = None) -> dict:
-    """Fetch weather via Open-Meteo (preferred) or wttr.in (fallback).
-    
-    Open-Meteo is free, fast, and works globally without an API key.
-    Both support location fuzzing, so 'London' finds the likely city.
-    """
+    """Fetch weather via Open-Meteo with wttr.in fallback."""
     import urllib.request
     import urllib.parse
 
     def _try_open_meteo(loc: str) -> dict:
-        """Open-Meteo: free, no API key, works globally."""
         if loc and loc != "auto":
             geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={urllib.parse.quote(loc)}&count=1&language=en&format=json"
             with urllib.request.urlopen(geo_url, timeout=8) as r:
@@ -399,7 +383,6 @@ def get_weather(location: str = None) -> dict:
             city = result.get("name", loc)
             country = result.get("country", "")
         else:
-            # No location given: use IP geolocation to detect user's approximate region.
             with urllib.request.urlopen("https://ipapi.co/json/", timeout=5) as r:
                 ip_data = json.loads(r.read())
             lat = ip_data["latitude"]
@@ -407,7 +390,6 @@ def get_weather(location: str = None) -> dict:
             city = ip_data.get("city", "Unknown")
             country = ip_data.get("country_name", "")
 
-        # Step 2: Get weather
         wx_url = (
             f"https://api.open-meteo.com/v1/forecast?"
             f"latitude={lat}&longitude={lon}"
@@ -426,7 +408,6 @@ def get_weather(location: str = None) -> dict:
         wind = round(cur["wind_speed_10m"])
         code = cur["weather_code"]
 
-        # WMO weather codes (standard in meteorology). Mapped to human-readable descriptions.
         WMO = {
             0: "Clear sky", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
             45: "Fog", 48: "Icy fog", 51: "Light drizzle", 53: "Drizzle",
@@ -477,27 +458,22 @@ def get_weather(location: str = None) -> dict:
     loc = (location or "").strip()
     errors = []
 
-    # Try Open-Meteo first. More reliable than wttr.in and doesn't have regional blocks.
     try:
         return _try_open_meteo(loc if loc else "auto")
     except Exception as e:
         errors.append(f"Open-Meteo: {e}")
 
-    # Fallback: wttr.in. Slightly slower but works when Open-Meteo times out.
     try:
         return _try_wttr(loc)
     except Exception as e:
         errors.append(f"wttr.in: {e}")
 
-    # Both failed
-    print(f"[Weather] All APIs failed: {errors}")
     return {
         "error": str(errors),
-        "display": f"Couldn't fetch weather for {'''+loc+''' if loc else 'your location'}. Error: {errors[0]}"
+        "display": f"Couldn't fetch weather for {'your location' if not loc else loc}. Error: {errors[0]}"
     }
 
 
-# Web search via DuckDuckGo. Enabled only in Celestial mode to avoid latency in normal mode.
 @ToolRegistry.register("web_search", "Search the web using DuckDuckGo", mode="celestial")
 def web_search(query: str) -> dict:
     try:
