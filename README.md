@@ -11,7 +11,7 @@
 
 ---
 
-###  Demo Video (https://drive.google.com/drive/folders/1f81-ywzv5yvzCLFH0fyWY58cwL8E-pmr?usp=sharing)·  [Architecture Diagram](https://www.figma.com/board/IZYJLudXF8mi4ZprEcKT1u/Untitled?t=kCzgTGCxZCRTJKmG-1) ·  [Research Document](https://docs.google.com/document/d/1_kr6pd4eOSz94jpHOdYlMmatRBgszenkkhtl7zsUtpw/edit?usp=sharing) ·
+### · [Demo Video](https://drive.google.com/drive/folders/1f81-ywzv5yvzCLFH0fyWY58cwL8E-pmr?usp=sharing) · [Architecture Diagram](https://www.figma.com/board/IZYJLudXF8mi4ZprEcKT1u/Untitled?t=kCzgTGCxZCRTJKmG-1) · [Research Document](https://docs.google.com/document/d/1_kr6pd4eOSz94jpHOdYlMmatRBgszenkkhtl7zsUtpw/edit?usp=sharing) ·
 ---
 
 ## 1. What is Anantum?
