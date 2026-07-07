@@ -104,14 +104,19 @@ class AgentBrain:
 
     def _safe_tool_run(self, tool_name: str, **kwargs) -> dict:
         result = ToolRegistry.run(tool_name, **kwargs)
+        if result is None:
+            result = {}
+        normalized = result.get("result")
+        if normalized is None:
+            result = {k: v for k, v in result.items() if k != "result"}
         payload = {
             "tool": tool_name,
             "success": bool(result.get("success", True)),
-            "result": result.get("result"),
+            "result": result.get("result") or {},
             "error": result.get("error"),
         }
-        if isinstance(result.get("result"), dict):
-            payload["display"] = result["result"].get("display")
+        if isinstance(payload["result"], dict):
+            payload["display"] = payload["result"].get("display")
         self._emit("tool_result", **payload)
         if not result.get("success", True):
             logger.warning("Tool '%s' failed: %s", tool_name, result.get("error"))

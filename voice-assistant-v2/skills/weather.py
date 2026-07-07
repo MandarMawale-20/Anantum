@@ -28,7 +28,6 @@ def get_weather(location: str = None) -> dict:
             city = result.get("name", loc)
             country = result.get("country", "")
         else:
-            # Use IP geolocation only when enabled.
             if not CONFIG.allow_ip_geolocation:
                 return {
                     "display": (
@@ -115,7 +114,10 @@ def get_weather(location: str = None) -> dict:
     errors = []
 
     try:
-        return _try_open_meteo(loc if loc else "auto")
+        result = _try_open_meteo(loc if loc else "auto")
+        if result is not None:
+            return result
+        errors.append("Open-Meteo: location not found")
     except Exception as e:
         errors.append(f"Open-Meteo: {e}")
 
