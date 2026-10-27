@@ -35,6 +35,22 @@ class MemoryEntry:
     embedding: list[float] = field(default_factory=list)
 
 
+def distance_to_score(distance: float, metric_type: Optional[int]) -> float:
+    """Convert a FAISS distance into a cosine-like similarity.
+
+    Embeddings are L2-normalised, so the default (L2) index returns the
+    squared euclidean distance ``d = 2 - 2*cos``. Collapsing it to
+    ``1 / (1 + d)`` (the old behaviour) maps every possible distance into
+    0.2-1.0, which made relevance thresholds meaningless.
+    """
+    if metric_type == getattr(faiss, "METRIC_INNER_PRODUCT", -1):
+        score = float(distance)
+    else:
+        score = 1.0 - (float(distance) / 2.0)
+    return max(-1.0, min(1.0, score))
+
+
+
 class WarmStore:
     """FAISS HNSW index for semantic similarity search over recent memories."""
 
@@ -200,7 +216,8 @@ class WarmStore:
         except Exception as e:
             logger.error("Failed to save warm store: %s", e)
 
-    def search(self, query: str, top_k: int = 5) -> list[tuple[MemoryEntry, float]]:
+    def search(self, query: str, top_k: int = 5,
+               min_score: Optional[float] = None) -> list[tuple[MemoryEntry, float]]:
         if faiss is None or self._index is None or self._model is None:
             return []
         query_vec = self._embed(query)
@@ -216,12 +233,9 @@ class WarmStore:
             for rank, i in enumerate(indices[0]):
                 if not (0 <= i < len(self.entries)):
                     continue
-                dist = float(distances[0][rank])
-                # Convert L2 distance to a bounded similarity-like score.
-                if metric_type == getattr(faiss, "METRIC_INNER_PRODUCT", -1):
-                    score = dist
-                else:
-                    score = 1.0 / (1.0 + max(dist, 0.0))
+                score = distance_to_score(float(distances[0][rank]), metric_type)
+                if min_score is not None and score < min_score:
+                    continue
                 results.append((self.entries[i], score))
             return results
         except Exception as e:

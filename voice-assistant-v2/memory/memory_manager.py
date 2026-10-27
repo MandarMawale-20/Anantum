@@ -105,11 +105,12 @@ class MemoryManager:
         if len(query) < 20 or query.lower() in ["hello", "hi", "hey"]:
             relevant_facts = []
         else:
-            warm_results = self.warm.search(query, top_k=5)
+            warm_results = self.warm.search(
+                query, top_k=5, min_score=CONFIG.memory_min_score
+            )
             relevant_facts = [
                 {"text": e.text, "score": round(score, 3), "type": e.memory_type}
                 for e, score in warm_results
-                if score > 0.15
             ]
 
         past_summaries = self.cold.get_recent_summaries(limit=2)

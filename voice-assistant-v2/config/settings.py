@@ -47,6 +47,8 @@ class AppConfig:
     warm_store_max_entries: int = 5000
     summary_threshold: int = 20
     embedding_model: str = "all-MiniLM-L6-v2"
+    # Minimum cosine similarity for a memory to be injected into the prompt.
+    memory_min_score: float = 0.35
     
     # Privacy
     allow_ip_geolocation: bool = False

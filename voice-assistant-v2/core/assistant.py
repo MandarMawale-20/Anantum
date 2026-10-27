@@ -64,7 +64,10 @@ class Anantum:
         self._event_sink = event_sink
         self._stop_requested = threading.Event()
         self._interrupt = threading.Event()
-        self._assistant_streaming = False
+        # One response at a time: the mic loop and the typed-input endpoint
+        # share the same brain/LLM, so overlapping turns would interleave
+        # two decodes on the same llama.cpp context.
+        self._generation_lock = threading.Lock()
         self._wake_terms = tuple(t.lower() for t in CONFIG.wake_word_terms)
         self._wake_enabled = bool(CONFIG.wake_word_enabled)
         self._wake_listener = None
@@ -168,7 +171,7 @@ class Anantum:
             self._emit("error", message=f"LLM load failed: {e}")
 
     def _on_user_speaking(self):
-        if self._assistant_streaming:
+        if self._generation_lock.locked():
             self._interrupt.set()
             self.tts_stream.stop()
         self._emit("status", state="listening", label="Listening")
@@ -184,6 +187,7 @@ class Anantum:
         return re.sub(r"\s+", " ", stripped).strip(" ,.!?")
 
     def _respond_streaming(self, user_text: str) -> str:
+        """Run one full turn. The caller must hold ``_generation_lock``."""
         sentence_re = re.compile(r"(.+?[.!?])(?:\s+|$)", re.DOTALL)
         stream_state = {"buf": "", "spoken": 0}
 
@@ -208,7 +212,6 @@ class Anantum:
                 stream_state["buf"] = stream_state["buf"][match.end():]
             return True
 
-        self._assistant_streaming = True
         self._interrupt.clear()
         self._emit("status", state="thinking", label="Thinking")
         response = self.brain.respond(user_text, on_token=on_token)
@@ -224,33 +227,51 @@ class Anantum:
                 self._emit("assistant_delta", text=clean_response)
                 self.tts_stream.push_text(clean_response)
 
-        self._assistant_streaming = False
         final = sanitize_response(response)
         self._emit("assistant_final", text=final)
         self._emit("status", state="idle", label="Idle")
         return final
+
+    def _try_respond(self, user_text: str) -> Optional[str]:
+        """Claim the single generation slot, or report that we're busy.
+
+        Returns None when another turn (voice or typed) is still running.
+        """
+        if not self._generation_lock.acquire(blocking=False):
+            self._emit("error", message="Still finishing the previous response.")
+            return None
+        try:
+            return self._respond_streaming(user_text)
+        finally:
+            self._generation_lock.release()
 
     def process_text_once(self, text: str) -> str:
         text = (text or "").strip()
         if not text:
             return ""
 
-        # The voice loop shares the same brain/LLM; refuse overlapping
-        # work instead of interleaving two generations.
-        if self._assistant_streaming:
-            self._emit("error", message="Still finishing the previous response.")
-            return ""
-
         self._emit("transcript", text=text)
         print(f"\033[93mYou:\033[0m {text}")
         print("\033[94mAnantum:\033[0m ", end="", flush=True)
-        response = self._respond_streaming(text)
-        if response:
-            print()
+        response = self._try_respond(text)
         print()
-        return response
+        return response or ""
 
     def run_voice(self):
+        if not getattr(self.stt, "available", True):
+            logger.warning("Voice mode unavailable: speech recognition failed to load")
+            self._emit(
+                "error",
+                message="Speech recognition unavailable — use the keyboard to type.",
+            )
+            if sys.stdin.isatty():
+                # Plain CLI: typing is still a useful fallback.
+                return self.run_text()
+            # Desktop bridge: stdin is the JSON command protocol, so reading
+            # from it is not an option. Stay alive so typed requests work.
+            self._stop_requested.wait()
+            return
+
         logger.info("Voice mode active. Ctrl+C to exit.")
         print("\033[36m[voice mode]  Ctrl+C to exit\033[0m\n")
         self._emit("status", state="idle", label="Idle")
@@ -294,7 +315,7 @@ class Anantum:
                 print("\033[94mAnantum:\033[0m ", end="", flush=True)
                 self._emit("status", state="thinking", label="Thinking")
 
-                self._respond_streaming(text)
+                self._try_respond(text)
                 print("\n")
 
             except KeyboardInterrupt:

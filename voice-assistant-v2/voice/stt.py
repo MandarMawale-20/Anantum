@@ -34,6 +34,11 @@ class WhisperSTT(BaseSTT):
         self._model_name = model
         self._device = device
         self._compute = compute
+        self._unavailable_warned = False
+
+    @property
+    def available(self) -> bool:
+        return self._model is not None
 
     def load(self) -> bool:
         try:
@@ -82,7 +87,12 @@ class WhisperSTT(BaseSTT):
 
     def transcribe(self, audio_path: str) -> str:
         if not self._model:
-            return input("You (text): ").strip()
+            # Never fall back to input(): in the desktop build stdin is the
+            # JSON command stream, so reading from it would hang the bridge.
+            if not self._unavailable_warned:
+                logger.error("Speech recognition unavailable; ignoring recorded audio")
+                self._unavailable_warned = True
+            return ""
         try:
             file_size = os.path.getsize(audio_path)
             if file_size < 16000:

@@ -14,6 +14,7 @@ from skills.base import ToolRegistry
 
 class TimerManager:
     """Thread-safe in-process timer manager with desktop notifications."""
+
     _timers: dict = {}
     _lock = threading.Lock()
     _event_callback = None
@@ -24,38 +25,29 @@ class TimerManager:
 
     @classmethod
     def set(cls, seconds: int, label: str = "Timer") -> dict:
-        # Start a background timer thread.
+        try:
+            seconds = max(1, int(seconds))
+        except (TypeError, ValueError):
+            seconds = 60
+
         timer_id = str(uuid.uuid4())
         end_time = time.time() + seconds
+        cancel = threading.Event()
 
-        def _fire():
-            time.sleep(seconds)
-            cls._notify(label, seconds)
-            callback = cls._event_callback
-            if callable(callback):
-                try:
-                    callback({
-                        "type": "reminder",
-                        "label": label,
-                        "seconds": seconds,
-                        "display": f"{label}: Time's up!",
-                    })
-                except Exception:
-                    logger.debug("Failed to emit timer reminder event", exc_info=True)
-            with cls._lock:
-                cls._timers.pop(timer_id, None)
-
-        t = threading.Thread(target=_fire, daemon=True)
-        t.start()
-
+        # Register before the thread starts so a 1s timer can never fire
+        # into an empty registry.
         with cls._lock:
             cls._timers[timer_id] = {
                 "id": timer_id,
                 "label": label,
                 "ends_at": end_time,
                 "seconds": seconds,
-                "thread": t
+                "cancel": cancel,
             }
+
+        threading.Thread(
+            target=cls._fire, args=(timer_id, seconds, label, cancel), daemon=True
+        ).start()
 
         duration_str = cls._format_duration(seconds)
         return {
@@ -64,6 +56,31 @@ class TimerManager:
             "duration": duration_str,
             "display": f"Timer set! I'll remind you in {duration_str}."
         }
+
+    @classmethod
+    def _fire(cls, timer_id: str, seconds: int, label: str, cancel: threading.Event) -> None:
+        # wait() returns True as soon as the timer is cancelled, so the
+        # sleeping thread exits instead of reminding after a cancel.
+        if cancel.wait(seconds):
+            return
+
+        with cls._lock:
+            if timer_id not in cls._timers:
+                return
+            cls._timers.pop(timer_id, None)
+
+        cls._notify(label, seconds)
+        callback = cls._event_callback
+        if callable(callback):
+            try:
+                callback({
+                    "type": "reminder",
+                    "label": label,
+                    "seconds": seconds,
+                    "display": f"{label}: Time's up!",
+                })
+            except Exception:
+                logger.debug("Failed to emit timer reminder event", exc_info=True)
 
     @classmethod
     def list(cls) -> dict:
@@ -89,14 +106,17 @@ class TimerManager:
         # Cancel one timer by ID or clear all timers.
         with cls._lock:
             if timer_id:
-                if timer_id in cls._timers:
-                    del cls._timers[timer_id]
-                    return {"display": f"Timer {timer_id} cancelled."}
-                return {"display": f"No timer found with ID {timer_id}."}
-            else:
-                count = len(cls._timers)
-                cls._timers.clear()
-                return {"display": f"Cancelled {count} timer(s)."}
+                entry = cls._timers.pop(timer_id, None)
+                if entry is None:
+                    return {"display": f"No timer found with ID {timer_id}."}
+                entry["cancel"].set()
+                return {"display": f"Timer {timer_id} cancelled."}
+
+            entries = list(cls._timers.values())
+            cls._timers.clear()
+            for entry in entries:
+                entry["cancel"].set()
+            return {"display": f"Cancelled {len(entries)} timer(s)."}
 
     @staticmethod
     def _notify(label: str, duration: int):

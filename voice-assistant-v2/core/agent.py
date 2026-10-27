@@ -8,6 +8,7 @@ from core.intent_detector import IntentPreClassifier, IntentType
 from core.llm_manager import LLMManager, format_generation_start, format_turn
 from memory.memory_manager import MemoryManager
 from skills.base import ToolRegistry
+from config.settings import CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -213,7 +214,9 @@ class AgentBrain:
         if self.llm.llm is None:
             return "I'm still loading my language model — I can't search memories right now."
         topic = params.get("topic") or params.get("original_query", "")
-        warm_results = self.memory.warm.search(topic, top_k=5)
+        warm_results = self.memory.warm.search(
+            topic, top_k=5, min_score=CONFIG.memory_min_score
+        )
         if not warm_results:
             return "I don't have specific memories about that yet."
 

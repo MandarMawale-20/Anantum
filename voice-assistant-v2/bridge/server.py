@@ -111,10 +111,13 @@ class AssistantRuntime:
             self._release_session_lock()
 
     def process_text(self, text: str) -> str:
+        # Only the lookup is locked: generation can take a while and stop()
+        # must still be able to interrupt it.
         with self._lock:
-            if not self.running or self._assistant is None:
+            assistant = self._assistant
+            if not self.running or assistant is None:
                 raise RuntimeError("Assistant is not running")
-            return self._assistant.process_text_once(text)
+        return assistant.process_text_once(text)
 
 def execute_command(runtime: AssistantRuntime, command: str, args: dict[str, Any]) -> dict[str, Any]:
     if command == "health":
