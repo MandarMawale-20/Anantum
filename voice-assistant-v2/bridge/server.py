@@ -114,8 +114,6 @@ class AssistantRuntime:
         with self._lock:
             if not self.running or self._assistant is None:
                 raise RuntimeError("Assistant is not running")
-            if self._mode != "text":
-                raise RuntimeError("Text input endpoint is only available in text runtime mode")
             return self._assistant.process_text_once(text)
 
 def execute_command(runtime: AssistantRuntime, command: str, args: dict[str, Any]) -> dict[str, Any]:

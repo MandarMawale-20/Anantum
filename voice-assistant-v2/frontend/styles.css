@@ -1,11 +1,35 @@
+/* ============================================================
+   Anantum — macOS 26 "Siri pill" redesign
+   • slim capsule with signature pink→violet→blue glow rim
+   • iridescent Siri orb (static bloom + live wave overlay)
+   • frosted answer bubble that expands the window upward
+   ============================================================ */
+
 :root {
-  --text-main: rgba(255, 255, 255, 0.95);
-  --text-subtle: rgba(235, 244, 255, 0.55);
-  --transition-smooth: 400ms cubic-bezier(0.175, 0.885, 0.32, 1.275);
+  --pill-h: 60px;
+  --stage-w: 430px;
+
+  --rim-pink: rgba(255, 92, 138, 0.9);
+  --rim-violet: rgba(214, 108, 255, 0.75);
+  --rim-blue: rgba(110, 168, 255, 0.8);
+  --rim-cyan: rgba(87, 227, 255, 0.75);
+
+  --state-hue: 210;
+  --state-glow: 0.38;
+  --glow-opacity: 0.5;
+
+  --transition-smooth: 340ms cubic-bezier(0.3, 0.9, 0.3, 1.1);
 }
 
 * {
   box-sizing: border-box;
+}
+
+/* Author styles like `.composer { display: flex }` beat the UA
+   `[hidden] { display: none }` rule, which made `element.hidden`
+   silently do nothing. Enforce it globally. */
+[hidden] {
+  display: none !important;
 }
 
 html,
@@ -13,296 +37,516 @@ body {
   width: 100%;
   height: 100%;
   margin: 0;
-  font-synthesis: none;
   padding: 0;
   background: transparent;
-  background-color: transparent;
   overflow: hidden;
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
 }
 
 body {
-  font-family: "SF Pro Display", "SF Pro Text", "Segoe UI Variable", "Segoe UI", sans-serif;
-  letter-spacing: 0.01em;
+  font-family: "SF Pro Display", "SF Pro Text", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  letter-spacing: 0.005em;
+  user-select: none;
 }
 
-.desktop-anchor {
+.stage {
+  display: flex;
+  /* Pill on top, answer card / composer below it — Siri's own order.
+     The window's BOTTOM edge is pinned and only its top edge moves, and
+     the slide itself is animated in Rust, so the stage grows and shrinks
+     without the pill ever snapping around. */
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding: 4px;
   width: 100%;
   height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 4px;
 }
 
-.assistant-pill {
-  width: calc(100% - 8px);
-  height: calc(100% - 8px);
-  min-height: unset;
+/* ------------------------------------------------------------
+   The pill
+   ------------------------------------------------------------ */
+.siri-pill {
+  position: relative;
+  height: var(--pill-h);
+  flex: none;
   border-radius: 9999px;
-  position: relative;
-  background: rgba(8, 8, 10, 0.68);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.08),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.35),
-    0 10px 28px rgba(0, 0, 0, 0.34);
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 7px 16px 7px 7px;
-  transition: transform var(--transition-smooth), box-shadow var(--transition-smooth), border-color var(--transition-smooth);
+  gap: 12px;
+  padding: 0 10px 0 10px;
   isolation: isolate;
-  -webkit-app-region: drag;
-  cursor: grab;
-  backdrop-filter: blur(16px) saturate(135%);
-  -webkit-backdrop-filter: blur(16px) saturate(135%);
-}
 
-.assistant-pill:hover {
-  transform: scale(1.016);
-  border-color: rgba(255, 255, 255, 0.32);
+  /* dark smoked-glass fill (no backdrop-filter: on a fully
+     transparent window it has nothing to blur and costs a
+     full extra compositing pass every frame) */
+  background:
+    linear-gradient(180deg, rgba(34, 36, 45, 0.72) 0%, rgba(19, 20, 28, 0.80) 8%, rgba(13, 14, 21, 0.86) 92%);
+
+  /* static shadow + soft colored halo (never animated: animating
+     shadow blur radii repaints every frame and can starve the
+     window's message loop) */
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.22),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.2),
-    0 6px 32px rgba(0, 0, 0, 0.3);
+    inset 0 1px 0 rgba(255, 255, 255, 0.24),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.35),
+    0 6px 18px -4px hsla(var(--state-hue), 85%, 58%, calc(var(--state-glow) * 0.6)),
+    0 10px 26px rgba(0, 0, 0, 0.32);
+  transition: box-shadow 400ms ease;
+  cursor: grab;
+  -webkit-app-region: drag;
+  contain: paint;
 }
 
-.assistant-pill:active {
-  transform: scale(0.97);
-  transition: transform 150ms ease-out;
-}
-
-.inner-highlight {
+/* === signature glow rim ==================================
+   thin gradient ring (masked to ~1.2px) sitting just on
+   the capsule edge — the Siri "light conduit" look */
+.pill-rim {
   position: absolute;
-  inset: 1px;
+  inset: 0;
   border-radius: inherit;
+  padding: 1.2px;
   pointer-events: none;
+  z-index: 3;
   background: linear-gradient(
-    160deg,
-    rgba(255, 255, 255, 0.08) 0%,
-    transparent 55%
+    95deg,
+    var(--rim-pink) 0%,
+    var(--rim-violet) 30%,
+    var(--rim-blue) 66%,
+    var(--rim-cyan) 100%
   );
-  opacity: 0.75;
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+          mask:
+            linear-gradient(#000 0 0) content-box,
+            linear-gradient(#000 0 0);
+          mask-composite: exclude;
 }
 
-.orb-shell {
+/* === outer halo ===========================================
+   Built from soft radial gradients instead of `filter: blur()`
+   — visually identical, but no per-frame filter pass. */
+.pill-glow {
+  position: absolute;
+  inset: -16px;
+  border-radius: 9999px;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(46% 130% at 12% 50%, rgba(255, 92, 138, 0.55), transparent 72%),
+    radial-gradient(46% 130% at 50% 50%, rgba(214, 108, 255, 0.45), transparent 74%),
+    radial-gradient(52% 140% at 88% 50%, rgba(87, 227, 255, 0.5), transparent 74%);
+  opacity: var(--glow-opacity);
+  will-change: opacity;
+  transition: opacity 400ms ease;
+}
+
+/* travelling light sweep, clipped to the capsule */
+.pill-clip {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.pill-sheen {
+  position: absolute;
+  top: -30%;
+  bottom: -30%;
+  left: -45%;
+  width: 40%;
+  transform: translateX(0) skewX(-16deg);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.14) 45%,
+    rgba(255, 255, 255, 0.24) 50%,
+    rgba(255, 255, 255, 0.14) 55%,
+    transparent
+  );
+  animation: sheen-sweep 9s cubic-bezier(0.55, 0, 0.45, 1) infinite;
+  will-change: transform;
+}
+
+@keyframes sheen-sweep {
+  0%   { transform: translateX(0) skewX(-16deg); opacity: 0; }
+  10%  { opacity: 1; }
+  55%  { opacity: 0.75; }
+  68%  { transform: translateX(430%) skewX(-16deg); opacity: 0; }
+  100% { transform: translateX(430%) skewX(-16deg); opacity: 0; }
+}
+
+/* ============================================================
+   Orb — static iridescent bloom + live wave overlay
+   ============================================================ */
+.orb {
   position: relative;
-  width: 48px;
-  min-width: 48px;
-  height: 48px;
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border: 0;
+  margin: 0;
+  padding: 0;
   border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   background: transparent;
-  border: 0.5px solid rgba(255, 255, 255, 0.22);
   cursor: pointer;
   outline: none;
-  transition: transform var(--transition-smooth), border-color var(--transition-smooth);
+  transition: transform var(--transition-smooth);
   -webkit-app-region: no-drag;
+  z-index: 4;
 }
 
-.orb-shell:hover {
-  transform: scale(1.05);
-  border-color: rgba(255, 255, 255, 0.38);
+.orb:hover { transform: scale(1.07); }
+.orb:active { transform: scale(0.94); }
+
+.orb:focus-visible {
+  box-shadow: 0 0 0 2px hsla(var(--state-hue), 90%, 72%, 0.85);
 }
 
-.orb-shell:focus-visible {
-  box-shadow: 0 0 0 2px rgba(156, 208, 255, 0.7);
+.orb-static,
+.orb-wave {
+  position: absolute;
+  pointer-events: none;
 }
 
-#siri-container {
-  width: 66px;
-  height: 33px;
-  transform: translateY(1px);
-  filter: drop-shadow(0 0 5px rgba(97, 183, 255, 0.4));
+/* bloom orb: bright lens core + iridescent rotating rim */
+.orb-static {
+  inset: 5px;
+  border-radius: 50%;
+  background:
+    radial-gradient(closest-side at 38% 36%, rgba(255, 255, 255, 0.98) 0%, rgba(235, 244, 255, 0.88) 30%, rgba(210, 225, 245, 0.20) 58%, transparent 70%);
+  box-shadow:
+    0 0 6px hsla(var(--state-hue), 95%, 72%, 0.45),
+    0 0 14px hsla(var(--state-hue), 95%, 65%, 0.28);
 }
 
-.assistant-copy {
-  position: relative;
+.orb-static::before {
+  /* iridescent rim ring */
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border-radius: 50%;
+  padding: 1.6px;
+  background: conic-gradient(
+    from 210deg,
+    #57e3ff,
+    #6ea8ff 22%,
+    #d66cff 48%,
+    #ff5c8a 66%,
+    #ffb27a 82%,
+    #57e3ff
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+          mask:
+            linear-gradient(#000 0 0) content-box,
+            linear-gradient(#000 0 0);
+          mask-composite: exclude;
+  filter: saturate(1.25) brightness(1.1);
+  opacity: 0.9;
+  transform: translateZ(0);
+  will-change: transform;
+  animation: orb-spin 18s linear infinite;
+}
+
+@keyframes orb-spin {
+  from { transform: rotate(0turn); }
+  to   { transform: rotate(1turn); }
+}
+
+/* live waveform overlay (shown only while active) */
+.orb-wave {
+  inset: -4px;
+  border-radius: 50%;
+  overflow: hidden;
+  opacity: 0;
+  transform: scale(0.7);
+  transition: opacity 260ms ease, transform 260ms ease;
+}
+
+.orb-wave canvas {
+  margin: 0 auto;
+}
+
+.is-listening .orb-wave,
+.is-thinking .orb-wave,
+.is-speaking .orb-wave {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.is-listening .orb-static,
+.is-thinking .orb-static,
+.is-speaking .orb-static {
+  opacity: 0;
+}
+
+.is-stopped .orb-static {
+  opacity: 0.35;
+  filter: saturate(0.4);
+}
+
+/* ============================================================
+   Pill text & right-side icon buttons
+   ============================================================ */
+.pill-text {
+  flex: 1;
   min-width: 0;
-  display: grid;
-  gap: 3px;
-  -webkit-app-region: no-drag;
-}
-
-button {
-  -webkit-app-region: no-drag;
-}
-
-.assistant-label {
   margin: 0;
-  color: var(--text-main);
-  font-size: clamp(0.88rem, 1.8vw, 1rem);
-  font-weight: 500;
-  line-height: 1.2;
-  text-wrap: pretty;
-  text-shadow: 0 1px 12px rgba(0, 0, 0, 0.5);
+  font-size: 15px;
+  font-weight: 530;
+  color: rgba(255, 255, 255, 0.95);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: min(240px, 55vw);
-  letter-spacing: -0.01em;
+  z-index: 4;
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.4);
 }
 
-.assistant-meta {
-  margin: 0;
-  color: var(--text-subtle);
-  font-size: 0.7rem;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  font-weight: 500;
-}
-
-.assistant-actions {
-  margin-top: 2px;
+.pill-actions {
   display: flex;
   align-items: center;
+  gap: 4px;
+  flex: none;
+  z-index: 4;
+  -webkit-app-region: no-drag;
+}
+
+.icon-btn {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 50%;
+  padding: 0;
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.88);
+  background: linear-gradient(150deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.04));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.30),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.25);
+  transition: transform 170ms ease, background 170ms ease, color 170ms ease;
+}
+
+.icon-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.icon-btn:hover {
+  transform: scale(1.08);
+  background: linear-gradient(150deg, rgba(255, 255, 255, 0.24), rgba(255, 255, 255, 0.08));
+  color: #fff;
+}
+
+.icon-btn:active { transform: scale(0.92); }
+
+.icon-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px hsla(var(--state-hue), 90%, 72%, 0.85);
+}
+
+/* ============================================================
+   Answer bubble below the pill (frosted glass)
+   ============================================================ */
+.below {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
   gap: 8px;
 }
 
-.ghost-action {
-  border: 0.5px solid rgba(255, 255, 255, 0.2);
-  background: transparent;
-  color: rgba(236, 246, 255, 0.88);
-  border-radius: 999px;
-  padding: 2px 10px;
-  font-size: 0.68rem;
-  letter-spacing: 0.03em;
-  text-transform: uppercase;
+body.no-resize .below {
+  display: none;
+}
+
+.bubble {
+  margin-top: 0;
+  padding: 14px 18px;
+  border-radius: 24px;
+  background: linear-gradient(168deg, rgba(255, 255, 255, 0.95) 0%, rgba(243, 246, 252, 0.88) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.85);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    0 18px 40px -16px rgba(8, 16, 40, 0.45),
+    0 2px 10px rgba(0, 0, 0, 0.16);
   cursor: pointer;
+  animation: bubble-in 240ms cubic-bezier(0.25, 0.8, 0.3, 1.05);
+  transform-origin: top center;
+  contain: paint;
 }
 
-.ghost-action:hover {
-  border-color: rgba(190, 230, 255, 0.6);
-  color: rgba(250, 253, 255, 0.95);
+.bubble[hidden] {
+  display: none;
 }
 
-.event-chip {
-  justify-self: start;
-  margin-top: 2px;
-  padding: 3px 9px;
-  border-radius: 999px;
-  font-size: 0.72rem;
-  color: rgba(245, 252, 255, 0.9);
-  background: transparent;
-  border: 0.5px solid rgba(255, 255, 255, 0.2);
-  white-space: nowrap;
-  letter-spacing: 0.02em;
+@keyframes bubble-in {
+  /* panels live below the pill, so they drop in from behind it */
+  from { opacity: 0; transform: translateY(-8px) scale(0.985); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
 }
 
-.reminder-stack {
+.bubble-text {
+  margin: 0;
+  color: #14151a;
+  font-size: 15.5px;
+  line-height: 1.5;
+  font-weight: 450;
+  letter-spacing: -0.002em;
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+}
+
+.bubble-text:empty { display: none; }
+
+/* single, quiet status line — no chip clutter */
+.bubble-notice {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.35;
+  color: rgba(22, 24, 32, 0.55);
+}
+
+.bubble-text:empty + .bubble-notice { margin-top: 0; }
+
+.bubble-notice.timer { color: rgba(104, 66, 190, 0.78); }
+.bubble-notice.error { color: rgba(196, 44, 66, 0.85); }
+
+.bubble-notice[hidden] { display: none; }
+
+.bubble-notice.leaving {
+  opacity: 0;
+  transition: opacity 220ms ease;
+}
+
+/* ============================================================
+   State choreography — only composited props (hue vars are
+   static per state; the halo pulses via opacity, never by
+   animating box-shadow blur, which would repaint every frame)
+   ============================================================ */
+.siri-pill.is-idle {
+  --state-hue: 210;
+  --state-glow: 0.38;
+  --glow-opacity: 0.5;
+}
+
+.siri-pill.is-listening {
+  --state-hue: 200;
+  --state-glow: 0.75;
+  --glow-opacity: 0.85;
+}
+
+.siri-pill.is-thinking {
+  --state-hue: 265;
+  --state-glow: 0.7;
+  --glow-opacity: 0.8;
+}
+
+.siri-pill.is-speaking {
+  --state-hue: 300;
+  --state-glow: 0.85;
+  --glow-opacity: 0.95;
+}
+
+.siri-pill.is-stopped {
+  --state-hue: 356;
+  --state-glow: 0.5;
+  --glow-opacity: 0.5;
+  filter: saturate(0.9);
+}
+
+/* halo breathing: opacity-only, GPU-composited */
+.siri-pill.is-listening .pill-glow {
+  animation: glow-pulse 2.4s ease-in-out infinite;
+}
+
+.siri-pill.is-speaking .pill-glow {
+  animation: glow-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes glow-pulse {
+  0%, 100% { opacity: 0.72; }
+  50%      { opacity: 1; }
+}
+
+/* ============================================================
+   Type-to-Anantum composer and the compact icon controls
+   ============================================================ */
+.composer {
   display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-  margin-top: 4px;
-  max-width: min(290px, 60vw);
+  align-items: center;
+  gap: 8px;
+  margin-top: 0;
+  padding: 6px 6px 6px 18px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(34, 36, 45, 0.88) 0%, rgba(15, 16, 23, 0.92) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    0 10px 26px rgba(0, 0, 0, 0.34);
+  animation: bubble-in 220ms cubic-bezier(0.25, 0.8, 0.3, 1.05);
+  transform-origin: top center;
 }
 
-.reminder-card {
-  display: inline-flex;
+.composer-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  outline: none;
+  color: rgba(255, 255, 255, 0.96);
+  font: inherit;
+  font-size: 14.5px;
+  padding: 6px 0;
+}
+
+.composer-input::placeholder {
+  color: rgba(255, 255, 255, 0.42);
+}
+
+.icon-btn.send {
+  background: linear-gradient(150deg, rgba(255, 255, 255, 0.22), rgba(120, 170, 255, 0.18));
+}
+
+/* compact icon-only control row (right-click) */
+.menu {
+  display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 10px;
+  width: fit-content;
+  margin-top: 0;
+  padding: 5px;
   border-radius: 999px;
-  border: 0.5px solid rgba(255, 255, 255, 0.18);
-  background: transparent;
-  color: rgba(244, 251, 255, 0.9);
-  font-size: 0.72rem;
-  line-height: 1;
-  animation: chipIn 280ms cubic-bezier(0.22, 0.61, 0.36, 1);
-}
-
-.reminder-card .dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: rgba(130, 210, 255, 0.9);
-}
-
-.reminder-card.reminder-note {
-  border-color: rgba(99, 205, 255, 0.25);
-}
-
-.reminder-card.reminder-timer {
-  border-color: rgba(166, 126, 255, 0.28);
-}
-
-.reminder-card.reminder-error {
-  border-color: rgba(255, 121, 121, 0.28);
-}
-
-.reminder-card.reminder-error .dot {
-  background: rgba(255, 130, 130, 0.9);
-}
-
-@keyframes chipIn {
-  from {
-    transform: translateY(4px) scale(0.97);
-    opacity: 0;
-  }
-  to {
-    transform: translateY(0) scale(1);
-    opacity: 1;
-  }
-}
-
-.assistant-pill.is-listening {
-  border-color: rgba(186, 223, 255, 0.5);
+  background: linear-gradient(180deg, rgba(34, 36, 45, 0.92) 0%, rgba(14, 15, 22, 0.95) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.14);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.22),
-    0 0 28px rgba(115, 177, 255, 0.3),
-    0 8px 40px rgba(147, 121, 255, 0.18);
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    0 12px 28px rgba(0, 0, 0, 0.38);
+  animation: bubble-in 180ms cubic-bezier(0.25, 0.8, 0.3, 1.05);
+  transform-origin: top center;
 }
 
-.assistant-pill.is-thinking {
-  border-color: rgba(200, 186, 255, 0.4);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.18),
-    0 0 22px rgba(157, 141, 255, 0.25),
-    0 6px 32px rgba(100, 80, 220, 0.15);
+.menu[hidden] { display: none; }
+
+/* Pause every animation while the window is not visible */
+body.is-hidden *,
+body.is-hidden *::before {
+  animation-play-state: paused !important;
 }
 
-.assistant-pill.is-speaking {
-  border-color: rgba(160, 230, 255, 0.55);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.25),
-    0 0 32px rgba(97, 183, 255, 0.35),
-    0 8px 48px rgba(74, 180, 255, 0.2);
-}
-
-@media (max-width: 520px) {
-  .desktop-anchor {
-    padding: 4px;
-  }
-
-  .assistant-pill {
-    width: calc(100vw - 16px);
-    min-height: 80px;
-    gap: 10px;
-    padding-right: 14px;
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
-    background: rgba(8, 8, 10, 0.6);
-
-  }
-
-  .orb-shell {
-    width: 62px;
-    min-width: 62px;
-    height: 62px;
-  }
-
-  #siri-container {
-    width: 82px;
-    height: 41px;
-  }
-
-  .assistant-label {
-    max-width: min(210px, 54vw);
-  }
-
-  .reminder-stack {
-    max-width: min(215px, 54vw);
-  }
+/* ------------------------------------------------------------
+   Reduced motion
+   ------------------------------------------------------------ */
+@media (prefers-reduced-motion: reduce) {
+  .pill-sheen { animation: none; opacity: 0; }
+  .orb-static::before { animation: none; }
+  .siri-pill.is-listening,
+  .siri-pill.is-speaking { animation: none; }
 }

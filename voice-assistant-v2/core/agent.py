@@ -210,6 +210,8 @@ class AgentBrain:
         return result.get("result", {}).get("display", "Couldn't read system info.")
 
     def _handle_memory_recall(self, params: dict) -> str:
+        if self.llm.llm is None:
+            return "I'm still loading my language model — I can't search memories right now."
         topic = params.get("topic") or params.get("original_query", "")
         warm_results = self.memory.warm.search(topic, top_k=5)
         if not warm_results:

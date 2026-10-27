@@ -235,6 +235,12 @@ class Anantum:
         if not text:
             return ""
 
+        # The voice loop shares the same brain/LLM; refuse overlapping
+        # work instead of interleaving two generations.
+        if self._assistant_streaming:
+            self._emit("error", message="Still finishing the previous response.")
+            return ""
+
         self._emit("transcript", text=text)
         print(f"\033[93mYou:\033[0m {text}")
         print("\033[94mAnantum:\033[0m ", end="", flush=True)

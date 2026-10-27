@@ -13,8 +13,8 @@
       {
         "label": "assistant",
         "title": "Anantum",
-        "width": 366,
-        "height": 76,
+        "width": 430,
+        "height": 68,
         "resizable": false,
         "fullscreen": false,
         "decorations": false,

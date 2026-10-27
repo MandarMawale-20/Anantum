@@ -1,3 +1,4 @@
+
 # Weather via Open-Meteo with wttr.in fallback.
 
 import json
@@ -47,7 +48,7 @@ def get_weather(location: str = None) -> dict:
             f"https://api.open-meteo.com/v1/forecast?"
             f"latitude={lat}&longitude={lon}"
             f"&current=temperature_2m,relative_humidity_2m,apparent_temperature,"
-            f"weather_code,wind_speed_10m"
+            f"weather_code,wind_speed_10m,precipitation,rain,showers"
             f"&wind_speed_unit=kmh&timezone=auto"
         )
         with urllib.request.urlopen(wx_url, timeout=8) as r:
@@ -61,16 +62,26 @@ def get_weather(location: str = None) -> dict:
         wind = round(cur["wind_speed_10m"])
         code = cur["weather_code"]
 
-        # WMO weather code map.
+        # WMO weather code map (complete).
         WMO = {
             0: "Clear sky", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
-            45: "Fog", 48: "Icy fog", 51: "Light drizzle", 53: "Drizzle",
-            55: "Heavy drizzle", 61: "Light rain", 63: "Rain", 65: "Heavy rain",
-            71: "Light snow", 73: "Snow", 75: "Heavy snow", 80: "Showers",
-            81: "Rain showers", 82: "Heavy showers", 95: "Thunderstorm",
-            96: "Thunderstorm with hail", 99: "Thunderstorm with heavy hail",
+            45: "Fog", 48: "Depositing rime fog",
+            51: "Light drizzle", 53: "Moderate drizzle", 55: "Dense drizzle",
+            56: "Light freezing drizzle", 57: "Dense freezing drizzle",
+            61: "Slight rain", 63: "Moderate rain", 65: "Heavy rain",
+            66: "Light freezing rain", 67: "Heavy freezing rain",
+            71: "Light snow", 73: "Moderate snow", 75: "Heavy snow",
+            77: "Snow grains",
+            80: "Light rain showers", 81: "Moderate rain showers", 82: "Violent rain showers",
+            85: "Light snow showers", 86: "Heavy snow showers",
+            95: "Thunderstorm", 96: "Thunderstorm with slight hail", 99: "Thunderstorm with heavy hail",
         }
         desc = WMO.get(code, f"Weather code {code}")
+        # Override desc with precipitation data when significant.
+        precip = cur.get("precipitation", 0) or 0
+        if precip > 0.5 and (cur.get("rain", 0) or 0) > 0.3:
+            intensity = "Heavy" if precip > 5 else "Light" if precip > 0.5 else ""
+            desc = f"{intensity} Rain".strip()
 
         display = (
             f"Weather in {city}, {country}:\n"
@@ -118,7 +129,7 @@ def get_weather(location: str = None) -> dict:
         if result is not None:
             return result
         errors.append("Open-Meteo: location not found")
-    except Exception as e:
+    except Exception as e: 
         errors.append(f"Open-Meteo: {e}")
 
     try:
@@ -129,5 +140,5 @@ def get_weather(location: str = None) -> dict:
     logger.warning("All weather APIs failed: %s", errors)
     return {
         "error": str(errors),
-        "display": f"Couldn't fetch weather for {'''+loc+''' if loc else 'your location'}. Error: {errors[0]}"
+        "display": f"Couldn't fetch weather for {loc if loc else 'your location'}. Error: {errors[0]}"
     }

@@ -9,6 +9,7 @@
     "core:event:allow-listen",
     "core:window:default",
     "core:window:allow-start-dragging",
-    "core:window:allow-set-shadow"
+    "core:window:allow-set-shadow",
+    "core:window:allow-close"
   ]
 }
